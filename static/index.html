@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spotify Clone</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span>Spotify Clone</span>
+    </div>
+    <form class="searchbar" id="searchForm" autocomplete="off">
+      <input id="searchInput" type="search" placeholder="Search YouTube for a song..." spellcheck="false" />
+      <button type="submit" id="searchButton" title="Search" aria-label="Search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+      </button>
+    </form>
+    <div class="cookie-status" id="cookieStatus">cookies: checking</div>
+  </header>
+
+  <main class="content" id="content">
+    <div class="state" id="emptyState">
+      <p>Search for anything to start listening.</p>
+      <p class="muted">Audio is streamed from YouTube through the local proxy.</p>
+    </div>
+    <ul class="results" id="results"></ul>
+    <div class="more-wrap">
+      <button id="moreButton" class="more-button" hidden>Show more</button>
+    </div>
+  </main>
+
+  <aside class="queue-panel" id="queuePanel" hidden>
+    <div class="queue-head">
+      <span>Queue (<span id="queueCount">0</span>)</span>
+      <div>
+        <button id="clearQueue" class="link-button">Clear</button>
+        <button id="closeQueue" class="icon-button" title="Hide queue" aria-label="Hide queue">&times;</button>
+      </div>
+    </div>
+    <ul id="queueList"></ul>
+  </aside>
+
+  <footer class="player" id="player">
+    <div class="now-playing">
+      <div class="np-title" id="npTitle">Nothing playing</div>
+      <div class="np-channel" id="npChannel">Pick a track with the play button</div>
+    </div>
+
+    <div class="transport">
+      <div class="buttons">
+        <button id="prevButton" class="icon-button" title="Previous" aria-label="Previous">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14"/><path d="M19 5 9 12l10 7z"/></svg>
+        </button>
+        <button id="playButton" class="play-button" title="Play" aria-label="Play">
+          <svg id="playIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5 19 12 7 19.5z"/></svg>
+          <svg id="pauseIcon" class="icon-hidden" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="3.6" height="14"/><rect x="13.9" y="5" width="3.6" height="14"/></svg>
+        </button>
+        <button id="nextButton" class="icon-button" title="Next" aria-label="Next">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14"/><path d="M5 5l10 7L5 19z"/></svg>
+        </button>
+      </div>
+      <div class="scrub">
+        <span class="time" id="currentTime">0:00</span>
+        <input id="scrubber" class="scrubber" type="range" min="0" max="100" value="0" step="0.1" />
+        <span class="time" id="durationTime">0:00</span>
+      </div>
+    </div>
+
+    <div class="extras">
+      <button id="queueButton" class="text-button" title="Toggle queue">Queue <span id="queueBadge">0</span></button>
+      <input id="volume" class="volume" type="range" min="0" max="1" step="0.01" value="0.9" title="Volume" aria-label="Volume" />
+    </div>
+  </footer>
+
+  <audio id="audio" preload="none"></audio>
+  <script src="/app.js"></script>
+</body>
+</html>

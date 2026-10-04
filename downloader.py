@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import io
 import os
+import queue
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -23,6 +25,23 @@ import library
 import library_db
 
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
+
+FG_PRIORITY = 0  # foreground lane: current track, never waits behind prefetch
+BG_PRIORITY = 1  # background lane: queue prefetch
+
+
+@dataclass
+class AudioJob:
+    """One encode job for the long-lived worker lanes."""
+
+    video_id: str
+    title: str
+    url: str
+    bitrate: int
+    memory_mode: bool
+    part_path: Optional[Path]  # None for memory jobs
+    final_path: Optional[Path]  # None for memory jobs
+    priority: int  # FG_PRIORITY or BG_PRIORITY
 
 # Playback-aware pacing: keep this many seconds of audio buffered ahead of the
 # playhead. The download gate pauses the ffmpeg-stdout pump when secured audio
@@ -69,17 +88,78 @@ def _publish(part_path: Path, final_path: Path, attempts: int = 25) -> None:
 
 
 class DownloadManager:
-    def __init__(self, on_finished: Optional[Callable[[str, str, Path], None]] = None):
+    def __init__(self, on_finished: Optional[Callable[[str, str, Path], None]] = None, max_workers: int = 3):
         self._on_finished = on_finished
         self._lock = threading.Lock()
         self._downloads: dict[str, dict[str, Any]] = {}
+        self._max_workers = max(1, int(max_workers or 3))
+        self._fg_queue: queue.Queue[AudioJob] = queue.Queue()
+        self._bg_queue: queue.Queue[AudioJob] = queue.Queue()
+        self._workers: list[threading.Thread] = []
+        # Lane split: 1 foreground worker, remainder background. Current-track
+        # jobs never queue behind prefetches. Total <= max_workers.
+        n_bg = max(1, self._max_workers - 1)
+        self._start_lane(self._fg_queue, 1, "fg")
+        self._start_lane(self._bg_queue, n_bg, "bg")
+
+    def _start_lane(self, q: queue.Queue[AudioJob], count: int, lane: str) -> None:
+        for i in range(count):
+            t = threading.Thread(
+                target=self._worker_loop, args=(q,), daemon=True,
+                name=f"dl-worker-{lane}-{i}",
+            )
+            t.start()
+            self._workers.append(t)
+
+    def _worker_loop(self, q: queue.Queue[AudioJob]) -> None:
+        """Long-lived worker: blocks on the queue when idle, never respawns."""
+        while True:
+            job = q.get()
+            try:
+                self._dispatch(job)
+            except Exception as exc:  # noqa: BLE001 - a worker must never die
+                print(f"[downloader] worker error {job.video_id}: {exc}")
+            finally:
+                q.task_done()
+
+    def _dispatch(self, job: AudioJob) -> None:
+        """Run one job on a worker thread (existing pump code, verbatim)."""
+        with self._lock:
+            rec = self._downloads.get(job.video_id)
+            if rec is None or rec.get("cancel"):
+                if rec is not None:
+                    rec["status"] = "cancelled"
+                return
+        if job.memory_mode:
+            self._run_memory(job.video_id, job.title, job.url, job.bitrate)
+        else:
+            assert job.part_path is not None and job.final_path is not None
+            self._run(job.video_id, job.title, job.url, job.part_path, job.final_path, job.bitrate)
+
+    def _enqueue(self, job: AudioJob) -> None:
+        (self._fg_queue if job.priority == FG_PRIORITY else self._bg_queue).put(job)
+
+    @property
+    def worker_count(self) -> int:
+        return len(self._workers)
 
     # ------------------------------------------------------------------ public
-    def start(self, video_id: str, title: str, url: str, bitrate: int = 320, memory_mode: bool = False) -> Optional[Path]:
+    def start(
+        self,
+        video_id: str,
+        title: str,
+        url: str,
+        bitrate: int = 320,
+        memory_mode: bool = False,
+        priority: int = FG_PRIORITY,
+    ) -> Optional[Path]:
         """Resolve the audio URL and stream it into a growing MP3.
 
         Returns the path of the partial file the player should read from.
         If a completed file already exists, returns it immediately (cache hit).
+        Work runs on the long-lived worker lanes (priority routes to the
+        foreground or background lane); registration still happens here so
+        concurrent duplicate starts are absorbed before any job is queued.
         """
         library_db.init_db()
         track = library_db.get_or_create_track(video_id, title, url, bitrate)
@@ -114,15 +194,10 @@ class DownloadManager:
                     "buffer": io.BytesIO(),
                     "playhead": 0.0,
                     "gated": False,
+                    "paused": False,
                 }
             library_db.update_track(video_id, status="downloading")
-            thread = threading.Thread(
-                target=self._run_memory,
-                args=(video_id, title, url, bitrate),
-                daemon=True,
-                name=f"dl-{video_id}",
-            )
-            thread.start()
+            self._enqueue(AudioJob(video_id, title, url, bitrate, True, None, None, priority))
             return None
 
         final_path = self._reserve_path(video_id, title, "mp3")
@@ -140,21 +215,16 @@ class DownloadManager:
                 "bitrate": bitrate,
                 "path": str(final_path),
                 "part": str(part_path),
-                    "cancel": False,
-                    "proc": None,
-                    "started": time.time(),
-                    "playhead": 0.0,
-                    "gated": False,
-                }
+                "cancel": False,
+                "proc": None,
+                "started": time.time(),
+                "playhead": 0.0,
+                "gated": False,
+                "paused": False,
+            }
         library_db.update_track(video_id, file_path=str(final_path), status="downloading")
 
-        thread = threading.Thread(
-            target=self._run,
-            args=(video_id, title, url, part_path, final_path, bitrate),
-            daemon=True,
-            name=f"dl-{video_id}",
-        )
-        thread.start()
+        self._enqueue(AudioJob(video_id, title, url, bitrate, False, part_path, final_path, priority))
         return part_path
 
     def get_progress(self, video_id: str) -> dict[str, Any]:

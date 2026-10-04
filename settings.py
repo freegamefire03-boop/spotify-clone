@@ -15,6 +15,7 @@ DEFAULTS: dict[str, Any] = {
     "memory_mode": False,    # don't save new audios to disk
     "continue_current": False,  # option 1: uncapped current-track download
     "queue_depth": 0,        # option 0: how many queue items to secure (0 = off)
+    "download_workers": 3,   # total encode lanes: 1 foreground + rest background
 }
 
 

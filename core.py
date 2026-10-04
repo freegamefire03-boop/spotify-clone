@@ -66,7 +66,18 @@ def _on_download_finished(video_id: str, title: str, mp3_path: Optional[Path]) -
         print(f"[library] {video_id} ready in memory")
 
 
-download_manager = downloader.DownloadManager(on_finished=_on_download_finished)
+def _worker_count() -> int:
+    try:
+        return max(1, min(4, int(settings.get("download_workers") or 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+# Long-lived encode lanes (1 foreground + rest background) start here at
+# import time, before the window opens. Daemon threads: never block exit.
+download_manager = downloader.DownloadManager(
+    on_finished=_on_download_finished, max_workers=_worker_count()
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -629,7 +640,10 @@ def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]]) -> Optio
     url = track.get("url") or f"https://www.youtube.com/watch?v={video_id}"
     bitrate = _current_bitrate()
     memory = bool(settings.get("memory_mode"))
-    return download_manager.start(video_id, title, url, bitrate, memory_mode=memory)
+    return download_manager.start(
+        video_id, title, url, bitrate, memory_mode=memory,
+        priority=downloader.FG_PRIORITY,
+    )
 
 
 def _open_shared(path: Path, mode: str = "rb"):
@@ -1048,7 +1062,10 @@ class Api:
                 track = library_db.get_track(vid)
                 if track and track.get("file_path") and Path(track["file_path"]).is_file():
                     continue
-                download_manager.start(vid, title, url, bitrate, memory_mode=memory)
+                download_manager.start(
+                    vid, title, url, bitrate, memory_mode=memory,
+                    priority=downloader.BG_PRIORITY,
+                )
             except Exception:  # noqa: BLE001 - one bad entry must not break play
                 continue
 

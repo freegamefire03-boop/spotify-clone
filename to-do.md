@@ -130,6 +130,9 @@ the same single channel*. Ideas to evaluate:
   page, and skip anything still downloading.
 - Downloaded titles must never show the download progress bar (currently it flashes
   0→100% then hides on cache hits).
+- Settings panel swap: `preview.html` holds a settings-modal redesign proposal.
+  First improve it to completion (fully polished, all settings wired), *then*
+  swap the app's settings panel with it — not before.
 
 ## Constraints / notes
 

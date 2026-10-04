@@ -153,7 +153,7 @@ Operations: `INSERT` (add), `SELECT WHERE video_id=?` (lookup → offline check)
 - **Phase 1 complete** (minus explicit zero-network replay confirmation): persistent library, instant-start playback, Windows locking safeguards, playback-readiness behavior, orphan cleanup, progress display, encode lanes.
 - **Phase 2–4 complete** (with pivots): pacing built then removed in favor of uncapped + watchdog; `continue_current` retired; prefetch gated only on `queue_depth`; settings panel, folder flow, cookie UI all shipped.
 - **v1 extras complete**: home view, watch history, sidebar, session restore, search focus.
-- **Playback-lane fix (uncommitted code, documented in CHANGELOG):** 10s pacing deleted (wedged the FG lane), stall watchdog + `-rw_timeout` + bounded resolve + generation tokens, hover moved to BG lane, zero-byte serves answer `503`, file logging to `spotify-clone.log`, lane depths in diagnostics.
+- **Playback-lane fix (committed, documented in CHANGELOG):** 10s pacing deleted (wedged the FG lane), stall watchdog + `-rw_timeout` + bounded resolve + generation tokens, hover moved to BG lane, zero-byte serves answer `503`, file logging to `spotify-clone.log`, lane depths in diagnostics.
 - **Still pending:** explicit zero-network offline-replay confirmation, deferred seek design (to-do §5), round-2 UI items (to-do §8: queue dismiss, Downloads page, offline mode, progress-bar suppression).
 - **Data constraint**: no audio downloads without asking first. Note: current tree downloads uncapped (full track + up to 3 prefetches per play) — watch data usage on limited connections.
 

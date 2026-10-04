@@ -1,47 +1,61 @@
 # TO-DO — mixed implemented and pending features
 
-> Status snapshot: 2026-10-04.
+> Status snapshot: 2026-10-04 (docs updated post-implementation).
 >
-> - **Implemented:** persistent-library core, direct-to-MP3 downloading, offline replay from disk, instant-start playback (valid-frame gate + adaptive burst + `prepare_track` + hover prefetch; manual pre-buffer removed), hidden ffmpeg process, playback readiness/retry behavior, friendly network errors, and YouTube URL search.
-> - **Still pending:** playback-aware download pacing, pause behavior, queue prefetch, memory mode, MP3-quality switch, settings panel, library-folder change flow, orphan cleanup, download-progress display, seeking into not-yet-downloaded bytes, startup session restore, search focus/shortcut, conditional home view, YouTube-style sidebar, and a long-lived background ffmpeg worker.
+> - **Implemented:** persistent-library core, direct-to-MP3 downloading, offline replay from disk, instant-start playback (valid-frame gate + adaptive burst + `prepare_track` + hover prefetch; manual pre-buffer removed), hidden ffmpeg process, playback readiness/retry behavior, friendly network errors, YouTube URL search, search focus + `Ctrl+L`, MP3-quality switch (128/192/320), download-progress display, settings panel (memory mode, prefetch depth, download folder, cookies, session), memory-mode backend, queue prefetch, long-lived encode lanes (1 FG + 2 BG), orphan `.part` cleanup, skip/interrupt handling (cancel + delete, no resume), download-folder change flow + copy prompt, conditional home view, YouTube-style sidebar, watch history + home sections, session restore, cookie management UI.
+> - **Implemented then superseded:** 10s-ahead pacing and pause-securing-10s were built, then removed by the playback-lane fix — downloads are now uncapped with a stall watchdog (see §1). `continue_current` setting retired.
+> - **Still pending:** seeking into not-yet-downloaded bytes (§5, deferred) and the round-2 UI items in §8.
 
 ## 1. Playback-aware downloading
 
-**Status: not implemented.**
+**Status: 10s-ahead pacing was implemented, then removed by the playback-lane
+fix. Current behaviour is uncapped (wifi-first) downloading.**
 
-**Default behaviour**
+**History**
 
-- Playback must be *live*: download the current track in the background as the
-  connection allows, always keeping a **10 second buffer ahead** of the playhead.
-- **Pause stops the download** — but only after the 10s-ahead margin is secured.
-  In other words: play = stream + download ahead; pause = finish securing 10s,
-  then stop fetching.
+- Built: 10s-ahead pacing (playhead reports from the GUI, pipe-backpressure gate
+  with hysteresis) and pause-freeze-after-10s. Shipped across `599bcec`/`39bb534`.
+- Removed: the gate wedged the single foreground encode lane on stalls, killing
+  all subsequent plays. The lane fix deleted pacing (`_wants_pause`, gate
+  constants, `is_gated`); the pump now reads flat-out until EOF.
+
+**Current behaviour**
+
+- Play = stream + download the whole track as fast as the connection allows.
+- Pause = plain freeze-in-place (no more fetching until resume).
+- A stall watchdog kills ffmpeg after 10 s with zero new bytes (30 s first-byte
+  grace, pause-exempt) plus ffmpeg `-rw_timeout`; resolve is bounded at 60 s.
+- Generation tokens: stale queued jobs drop at dispatch, late resolves never
+  spawn ffmpeg, superseded workers can't poison newer state.
 
 **Settings**
 
 | # | Option | Default | Behaviour |
 |---|--------|---------|-----------|
-| 1 | Continue downloading the current track | OFF | When ON: download the current audio with **no 10s cap**, and keep downloading even while the audio is paused. |
-| 2 | Download the queue as well | OFF | Only available when option 1 is ON (no point securing the queue if the current track isn't secured). Accepts an **integer >= 1**: how many upcoming queue items to keep secured. Re-checked whenever a new track starts: make sure the next N queue items are downloaded, **current playback has priority**. With a stable connection and N=2, the app secures the next 2, and after each new track starts it tops the margin back up to 2. |
+| 1 | ~~Continue downloading the current track~~ | — | **Retired** with pacing (uncapped is now the only mode). |
+| 2 | Download the queue as well (`queue_depth`) | 3 | No longer gated on option 1. Accepts an integer 0–10 (0 = off). Re-checked whenever a new track starts; current playback has priority via the FG lane. |
 | 3 | Persistent local library (always on) | ON | Every audio is downloaded and kept in persistent storage. **Implemented.** |
 
 ## 2. Local library, DB and storage
 
-**Status: core implemented; folder-change behavior not implemented.**
+**Status: core + folder-change flow implemented.**
 
 - **Filename** = the YouTube title. **Implemented**, with Windows-unsafe characters removed and filename collisions disambiguated.
 - **Local DB** records, per audio: `title`, `url`, `id` (when the video has one),
   and the `audio path`. **Implemented.**
 - Next time an audio is requested it is **fetched from storage** instead of the
   network, and it is **accessible offline**. **Implemented for complete files.**
-- **Settings: download folder picker.**
-  - Default folder: the user's **Music** folder.
+- **Settings: download folder picker.** **Implemented** (settings-panel text
+  input + backend validation, default = user's **Music** folder).
   - If the user changes the path, prompt:
     *"Do you want to copy the existing audios to the new path?"*
-    - **Yes** → copy all existing audios to the new path and update the DB paths.
+    - **Yes** → copy all existing audios to the new path and update the DB paths
+      (name collisions get a `[video_id]` suffix; failures keep the old path and
+      are reported).
     - **No** → leave them where they are. The DB keeps the **old** paths for those
       files (so they are still fetched from there) while **new** downloads go to
       the new folder.
+  - Blocked while downloads are active (in-flight `.part` paths are pinned at start).
 
 ## 3. Real files, not DRM
 
@@ -52,12 +66,12 @@
 
 ## 4. Memory mode (GUI toggle, in the player)
 
-**Status: not implemented.** A `memory_mode` setting key exists, but there is no
-GUI toggle and the downloader does not yet use it.
+**Status: implemented** (settings-panel toggle + downloader backend).
 
 - Default **OFF**.
-- When ON: new audios are **not saved to disk**. They are loaded into memory,
-  used for playback, and discarded when finished.
+- When ON: new audios are **not saved to disk**. ffmpeg encodes to stdout into
+  an in-memory buffer, served progressively and with full Range support once
+  complete; discarded when finished (memory rows purged from the DB on restart).
 - Audios already in local storage are still fetched from storage — this option
   only stops *saving new ones*.
 
@@ -82,35 +96,51 @@ the same single channel*. Ideas to evaluate:
 
 ## 6. Conditional home view and sidebar
 
-**Status: not implemented.** There is currently no landing view or hamburger sidebar.
+**Status: implemented.**
 
-- If cookies are on, the main page should show YouTube-style recommendations, preferably the exact recommendations YouTube would show if yt-dlp supports them.
-- If cookies are off, the main page should show recently played tracks plus offline tracks.
-- Any search should hide the main-page content and let search results take over.
-- Add a left sidebar that can be opened by clicking a three-line menu icon or by hovering the left edge.
-- Sidebar opened with the icon must remain open until the icon is clicked again.
-- Icon-opened sidebar must not cover app content; search results and the layout must resize/rescale around it.
-- Edge-hover sidebar must float above the app without resizing/rescaling it, and must close when the pointer leaves the sidebar frame.
+- If cookies are on, the main page shows YouTube recommendations via yt-dlp
+  `:ytrecommended` (trending fallback, then library fallback), cached 10 min.
+- If cookies are off, the main page shows recently played + offline tracks.
+- Any search hides the main-page content and lets search results take over;
+  clearing the box (or `Esc`) restores home from cache.
+- Left sidebar: hamburger icon opens **push** mode (layout resizes around it,
+  stays open until toggled); left-edge hover opens **overlay** mode (floats,
+  closes on pointer-leave). Push degrades to overlay under 860 px. Items: Home,
+  Queue, Settings — all wired, no dead buttons.
 
-## 7. Other pending work captured during implementation
+## 7. Other work captured during implementation (all implemented 2026-10-04)
 
-- MP3 quality selector: tri-position 128/192/320 control, default 320, in the player scrubber.
-- Settings panel: expose memory mode, continue-current, and queue depth (startup pre-buffer removed 2026-10-04 — auto-calibrated).
-- Download-progress display wired to the existing backend progress data.
-- Startup cleanup for orphaned unfinished download files.
-- Skipped/interrupted-download handling: decide whether partial downloads resume, are retained, or are deleted.
+- MP3 quality selector: tri-position 128/192/320 control, default 320, in the player extras area.
+- Settings panel: memory mode, queue depth (0–10), download folder, cookies, session — plus bitrate (see above).
+- Download-progress display wired to the existing backend progress data (bar + `written/total`, auto-hides; never shown for cache hits).
+- Startup cleanup for orphaned unfinished download files (`reconcile_stale_downloads` + `*.part` sweep, stats logged).
+- Skipped/interrupted-download handling: **no resume** (CBR re-encode can't resume — restart from 0 is correct and cheapest). Skip cancels the previous download + deletes its `.part`; failures delete the `.part`; cancel paths self-clean; quit relies on startup reconcile.
 - Download-folder change flow and prompt described in section 2.
-- Cookie management UI: `cookies.txt` must currently be placed manually in the project root; the GUI only displays cookie status.
-- Personalized landing content: search and playback work with or without cookies, but there is no YouTube watch-history, recommendations, preferences, or playlist landing page.
-- Long-lived background ffmpeg worker: start the audio-processing worker when the app starts and keep it alive. Current behavior launches a short-lived ffmpeg process for each download and exits when that download completes or fails. The pending design must define a worker/service interface that can receive successive audio jobs without a cold start for every track.
-- Session restore: when the app first opens, remember and restore the last playing track plus the queue.
-- Search focus: focus the search box on first open, and add `Ctrl+L` as a shortcut that returns focus to it for typing.
+- Cookie management UI: paste-install with Netscape validation, status (size/date), remove, home/search cache reset on change.
+- Personalized landing content: local watch history (`play_count`, `last_played_at`) + home sections ("Recently played" distinct from recommendations/offline). YouTube-side history/playlists and playlist CRUD explicitly deferred (login-only / separate milestone).
+- Long-lived background encode lanes: 1 FG + 2 BG persistent workers pulling `AudioJob`s (priority-routed); ffmpeg stays per-track (CLI is one-input-one-run).
+- Session restore: queue + index persist debounced to `settings.json`; restore is paused (no autoplay, no download) with cold-start play on first gesture.
+- Search focus: search box focused on first open; `Ctrl+L` refocuses; `Esc` clears search and restores home.
+
+## 8. Round-2 UI work (noted 2026-10-04, pending)
+
+- Queue panel dismiss: close on outside click and on `Esc` (X button already works).
+- Sidebar Downloads section: opens a Downloads page listing all downloaded tracks.
+- Offline mode: disconnect the app completely from the internet, open the Downloads
+  page, and skip anything still downloading.
+- Downloaded titles must never show the download progress bar (currently it flashes
+  0→100% then hides on cache hits).
 
 ## Constraints / notes
 
 - Data budget on the current connection is very limited: no audio streaming
   tests, no dependency downloads, and no YouTube fetches without asking first.
 - `/audio/<id>` serves complete cached files from disk with seeking, streams the
-  growing MP3 while ffmpeg is writing, and can fall back to YouTube when no
-  title/URL is known. Playback-aware pacing, pause behavior, and queue prefetch
-  are still pending.
+  growing MP3 while ffmpeg is writing, answers `503` when the prefix wait
+  expires with zero bytes, and can fall back to YouTube when no title/URL is
+  known. Downloads are uncapped (pacing removed, see §1); queue prefetch
+  follows `queue_depth`.
+- Playback failure notes (2026-10-04): a wedged FG lane (fixed by the lane
+  watchdog) and an empty-200 serve path (fixed by answering `503`) were the
+  root causes of "no supported source" with "0 B downloaded". Failures now
+  land in `spotify-clone.log` with lane depths attached.

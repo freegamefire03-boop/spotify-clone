@@ -1,5 +1,75 @@
 # Changelog
 
+## 2026-10-04 — Features Groups 1–6 (18 items, commits b3e1ba7 → 2f315ad)
+
+### Group 1 — Quick UI wins
+- Search focus on open + `Ctrl+L` shortcut (`b3e1ba7`).
+- MP3 quality tri-switch 128/192/320, default 320 (`b3e1ba7`).
+- Download-progress bar + text under now-playing, 1 s poll, auto-hide (`b3e1ba7`).
+- Settings panel shell: memory mode, continue-current, queue depth (`b3e1ba7`).
+
+### Group 2 — Settings behavior
+- Memory mode backend: ffmpeg→stdout→RAM buffer, progressive + Range serving,
+  disk cache still wins, DB purge on restart (`b3e1ba7`).
+
+### Group 3 — Download policy
+- 10s-ahead pacing via pipe-backpressure gate + hysteresis (`599bcec`).
+- Pause freezes after securing the 10 s margin (`39bb534`).
+- Queue prefetch: next-N via `Api.play(upcoming)`, gated on `continue_current` (`6949dcd`).
+- Long-lived lanes: 1 FG + 2 BG workers, priority-routed `AudioJob`s (`d5ab998`).
+
+### Group 4 — Library maintenance
+- Startup orphan `.part` cleanup + sweep with stats (`97d4746`).
+- Skip/interrupt: no resume (CBR can't); skip cancels + deletes (`b6ca617`).
+- Folder change flow: validated picker, copy prompt + collision handling,
+  in-flight guard (`5754d28`).
+
+### Group 5 — Frontend views
+- Conditional home: `:ytrecommended`/trending/library fallbacks, 10-min cache (`6bf4408`).
+- Sidebar: push via hamburger, overlay via edge hover (`f7095d3`).
+- Watch history: `play_count`/`last_played_at` + home sections (`c8a1c12`).
+
+### Group 6 — Session/cookies
+- Session restore: debounced queue+qIndex persist, paused restore (`4b3d5c0`).
+- Cookie UI: paste-install + validation, status, remove, cache reset (`2f315ad`).
+
+## 2026-10-04 — Playback-lane fix (post-d5ab998 regression)
+
+### Root cause
+
+- `d5ab998` (long-lived 1 FG + 2 BG lanes) let one wedged job pin the single
+  foreground lane forever: `_resolve` (blocking yt-dlp, no deadline) and the
+  pumped `stream.read()` (no timeout) never released the worker. Every later
+  play queued behind it while *looking* active, timed out through the 5s +
+  30s serve gates, and received a `200 OK` with zero bytes — Chromium's
+  "no supported source" plus a stuck "0 B downloaded".
+- Hover prefetch made it worse: every hovered row became an FG-lane job.
+
+### Fixed
+
+- Uncapped downloading (wifi-first): 10s-ahead pacing gate deleted
+  (`_wants_pause`, `BUFFER_AHEAD_SEC`, `is_gated`); pump reads flat-out,
+  pause = plain freeze-in-place. `continue_current` setting + UI removed;
+  queue prefetch now depends only on `queue_depth` (default 0 → 3).
+- Hover warms on the BG lane and no longer touches play history/playhead.
+- Resolve bounded (`RESOLVE_TIMEOUT_SEC`, disposable thread) + per-job
+  generation tokens: stale queued jobs drop at dispatch, late resolves never
+  spawn ffmpeg, superseded workers can't poison newer state.
+- Stall watchdog (`FIRST_BYTE_GRACE_SEC` + `STALL_TIMEOUT_SEC`): a hung
+  ffmpeg is terminated and the job fails instead of wedging a lane. Paused
+  time never trips it. ffmpeg `-rw_timeout` as network backstop.
+- Honest errors: zero-byte serve paths answer `503` instead of empty `200`.
+- Mid-session orphan `.part` reaper in `Api.play` (startup sweep was
+  startup-only).
+- Observability: timestamped `spotify-clone.log` (pythonw has no console) +
+  FG/BG queue depths in `status`/`download_progress`.
+
+### Verified
+
+- `py_compile` clean, `node --check static/app.js` clean.
+- 15 stubbed checks pass (watchdog, pause-exempt, hover→BG, 503, reaper,
+  resolve-timeout bound, generation isolation, lanes, logging, prefetch).
+
 ## 2026-10-04 — Downloader regression fix (missing `import os`)
 
 ### Root cause

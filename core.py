@@ -1069,11 +1069,33 @@ class Api:
             except Exception:  # noqa: BLE001 - one bad entry must not break play
                 continue
 
+    def abandon_track(self, video_id: str) -> dict[str, Any]:
+        """Cancel an in-flight download and delete its partial file."""
+        download_manager.cancel(video_id)
+        return {"ok": True}
+
     def play(
-        self, video_id: str, title: str, url: str, upcoming: Any = None
+        self, video_id: str, title: str, url: str, upcoming: Any = None,
+        prev_id: Any = None,
     ) -> dict[str, Any]:
         """Register a track and start downloading it (called by the GUI on play)."""
         library_db.init_db()
+        # Skip path: cancel the previously-playing download so it stops
+        # fetching and frees the foreground lane. Prefetch ids are never
+        # cancelled (guarded below); completed files are left alone.
+        if prev_id and prev_id != video_id:
+            try:
+                upcoming_ids = {
+                    item.get("id") for item in (upcoming or [])
+                    if isinstance(item, dict) and item.get("id")
+                }
+                if prev_id not in upcoming_ids:
+                    old = library_db.get_track(str(prev_id))
+                    if not (old and old.get("status") == "mp3" and old.get("file_path")
+                            and Path(old["file_path"]).is_file()):
+                        download_manager.cancel(str(prev_id))
+            except Exception:  # noqa: BLE001 - cancel must never break play
+                pass
         track = library_db.get_or_create_track(video_id, title, url, int(settings.get("bitrate") or 320))
         if track.get("status") == "mp3" and track.get("file_path"):
             existing = Path(track["file_path"])

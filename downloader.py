@@ -129,6 +129,10 @@ class DownloadManager:
             if rec is None or rec.get("cancel"):
                 if rec is not None:
                     rec["status"] = "cancelled"
+                try:
+                    library_db.set_status(job.video_id, "cancelled")
+                except Exception:  # noqa: BLE001 - DB write must not kill a worker
+                    pass
                 return
         if job.memory_mode:
             self._run_memory(job.video_id, job.title, job.url, job.bitrate)
@@ -586,6 +590,11 @@ class DownloadManager:
                 with self._lock:
                     if video_id in self._downloads:
                         self._downloads[video_id]["status"] = "cancelled"
+                        self._downloads[video_id].pop("buffer", None)
+                try:
+                    library_db.set_status(video_id, "cancelled")
+                except Exception:  # noqa: BLE001
+                    pass
                 return
 
             if code != 0 or buffer.tell() == 0:
@@ -695,9 +704,20 @@ class DownloadManager:
                 rec = self._downloads.get(video_id)
                 cancelled = bool(rec and rec.get("cancel"))
             if cancelled:
+                # File handle is closed (the `with open(...)` block exited),
+                # so delete the abandoned .part now; the startup sweep is
+                # the backstop if Windows still holds the file locked.
                 with self._lock:
                     if video_id in self._downloads:
                         self._downloads[video_id]["status"] = "cancelled"
+                try:
+                    part_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                try:
+                    library_db.set_status(video_id, "cancelled")
+                except Exception:  # noqa: BLE001
+                    pass
                 return
 
             if code != 0 or not part_path.exists() or part_path.stat().st_size == 0:

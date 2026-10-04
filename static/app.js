@@ -47,7 +47,7 @@ function useBridge() {
   backend = {
     search: (q, offset, limit) => api.search(q, offset, limit),
     status: () => api.status(),
-    play: (id, title, url, upcoming) => api.play(id, title, url, upcoming ?? null),
+    play: (id, title, url, upcoming, prevId) => api.play(id, title, url, upcoming ?? null, prevId ?? null),
     prepareTrack: (id) => api.prepare_track(id),
     setBitrate: (val) => api.set_bitrate(val),
     downloadProgress: (id) => api.download_progress(id),
@@ -272,6 +272,7 @@ function updateNowPlaying() {
 
 async function playTrack(track) {
   state.errorRetried = false;
+  const prevId = state.current && state.current.id !== track.id ? state.current.id : null;
   state.current = track;
   lastPlayheadSent = -10;
   lastPlayheadAt = 0;
@@ -300,7 +301,7 @@ async function playTrack(track) {
     const upcoming = state.queue
       .slice(state.qIndex + 1, state.qIndex + 1 + 5)
       .map((t) => ({ id: t.id, title: t.title, url: `https://www.youtube.com/watch?v=${t.id}` }));
-    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, upcoming).catch(() => {});
+    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, upcoming, prevId).catch(() => {});
   }
 
   // Wait until the server can serve a valid MP3 prefix before assigning src.

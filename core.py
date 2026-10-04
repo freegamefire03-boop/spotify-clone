@@ -38,6 +38,11 @@ SEARCH_POOL = 50
 SEARCH_TTL = 600.0
 STREAM_TTL = 240.0
 CHUNK = 65536
+# Minimum bytes for a valid MP3 prefix (ID3v2 header + first frame sync).
+# Chromium's demuxer needs a complete frame to lock onto the format.
+MIN_VALID_MP3_PREFIX = 4 * 1024
+# MP3 sync word: 0xFF 0xEx or 0xFF 0xFx (MPEG audio frame sync)
+MP3_SYNC_WORDS = (b"\xff\xfb", b"\xff\xfa", b"\xff\xf3", b"\xff\xf2")
 # m4a/AAC first: progressive <audio> playback and seeking are far more reliable
 # in WebView2 than webm/opus, which can stall near the end of a stream.
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
@@ -47,30 +52,16 @@ _search_lock = threading.Lock()
 _stream_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _stream_lock = threading.Lock()
 
-
-def _on_download_finished(video_id: str, title: str, m4a_path: Path) -> None:
-    """Transcode a finished m4a to MP3 in the background (decision A)."""
-    if settings.get("memory_mode"):
-        return
-    threading.Thread(
-        target=_transcode_worker, args=(video_id, title, m4a_path), daemon=True, name=f"tc-{video_id}"
-    ).start()
+# Windows will not let a file be renamed while a reader still holds it open.
+# Readers register here so the downloader can drain them before it renames the
+# finished .part file into place.
+_open_readers: dict[str, int] = {}
+_readers_lock = threading.Lock()
 
 
-def _transcode_worker(video_id: str, title: str, m4a_path: Path) -> None:
-    bitrate = int(settings.get("bitrate") or 320)
-    mp3_path = m4a_path.with_suffix(".mp3")
-    cmd = [
-        "ffmpeg", "-y", "-i", str(m4a_path),
-        "-vn", "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
-        str(mp3_path),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
-        library_db.update_track(video_id, status="mp3", file_path=str(mp3_path))
-        print(f"[transcode] {video_id} -> {mp3_path.name}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[transcode] {video_id} failed: {exc}")
+def _on_download_finished(video_id: str, title: str, mp3_path: Path) -> None:
+    """The file is already a valid MP3 — nothing left to transcode."""
+    print(f"[library] saved {mp3_path.name}")
 
 
 download_manager = downloader.DownloadManager(on_finished=_on_download_finished)
@@ -520,10 +511,10 @@ def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]]) -> Optio
     if track is None:
         return None
     if download_manager.is_active(video_id):
-        return Path(download_manager.get_progress(video_id).get("path", ""))
+        return download_manager.part_path(video_id)
     title = track.get("title") or video_id
     url = track.get("url") or f"https://www.youtube.com/watch?v={video_id}"
-    bitrate = int(settings.get("bitrate") or 320)
+    bitrate = _current_bitrate()
     return download_manager.start(video_id, title, url, bitrate)
 
 
@@ -535,6 +526,24 @@ def _open_shared(path: Path, mode: str = "rb"):
         except PermissionError:
             time.sleep(0.1)
     return open(path, mode)
+
+
+def _register_reader(key: str) -> None:
+    with _readers_lock:
+        _open_readers[key] = _open_readers.get(key, 0) + 1
+
+
+def _release_reader(key: str) -> None:
+    with _readers_lock:
+        if key in _open_readers:
+            _open_readers[key] -= 1
+            if _open_readers[key] <= 0:
+                _open_readers.pop(key, None)
+
+
+def reader_count(key: str) -> int:
+    with _readers_lock:
+        return _open_readers.get(key, 0)
 
 
 def _readable_path(path: Path) -> Path:
@@ -574,62 +583,188 @@ def _serve_file(start_response: Callable, path: Path, range_header: Optional[str
     return _iter_file(_open_shared(path), total)
 
 
+def _find_mp3_sync(data: bytes) -> int:
+    """Return offset of first MP3 sync word in data, or -1."""
+    for sync in MP3_SYNC_WORDS:
+        idx = data.find(sync)
+        if idx != -1:
+            return idx
+    return -1
+
+
+def _has_valid_mp3_prefix(path: Path) -> bool:
+    """Check if file starts with a valid MP3 frame (ID3v2 or sync word)."""
+    try:
+        if not path.exists() or path.stat().st_size < MIN_VALID_MP3_PREFIX:
+            return False
+        with open(path, "rb") as f:
+            head = f.read(MIN_VALID_MP3_PREFIX)
+        # Skip ID3v2 tag if present
+        if head[:3] == b"ID3":
+            # ID3v2 size is syncsafe integer (7 bits per byte)
+            size = ((head[6] & 0x7F) << 21) | ((head[7] & 0x7F) << 14) | \
+                   ((head[8] & 0x7F) << 7) | (head[9] & 0x7F)
+            offset = 10 + size
+            if offset >= len(head):
+                return False
+            return _find_mp3_sync(head[offset:offset + 4]) != -1
+        return _find_mp3_sync(head[:4]) != -1
+    except OSError:
+        return False
+
+
+class _AdaptiveGate:
+    """Auto-calibrates initial burst size from measured ffmpeg throughput."""
+
+    def __init__(self, bitrate_bps: int):
+        self.bitrate = bitrate_bps
+        self.observed_bps: float | None = None
+        self._t0: float | None = None
+        self._bytes_at_t0: int = 0
+
+    def want(self) -> int:
+        """Target bytes: enough for ~300ms audio + jitter, capped by throughput."""
+        base = max(MIN_VALID_MP3_PREFIX, int(self.bitrate * 0.3 / 8))
+        if self.observed_bps:
+            max_wait = int(self.observed_bps * 0.4 / 8)
+            base = min(base, max_wait)
+        return base
+
+    def tick(self, part: Path):
+        """Call periodically to measure throughput."""
+        now = time.monotonic()
+        try:
+            size = part.stat().st_size if part.exists() else 0
+        except OSError:
+            return
+        if self._t0 is None:
+            self._t0, self._bytes_at_t0 = now, size
+        elif now - self._t0 >= 0.5:
+            dt = now - self._t0
+            if dt > 0 and size > self._bytes_at_t0:
+                self.observed_bps = (size - self._bytes_at_t0) * 8 / dt
+            self._t0, self._bytes_at_t0 = now, size
+
+
 def _serve_partial(
     start_response: Callable, video_id: str, path: Path, total: int, range_header: Optional[str]
 ):
-    """Stream a file that is still being written, blocking at the written edge."""
-    start = 0
-    if range_header and total:
-        window = _parse_range(range_header, total)
-        if window:
-            start = window[0]
-    ctype = mimetypes.guess_type(path.name)[0] or "audio/mpeg"
-    headers = [
-        ("Content-Type", ctype),
-        ("Accept-Ranges", "bytes"),
+    """Stream the MP3 that ffmpeg is still writing (one channel: play + save).
+
+    No Content-Length is sent while the file grows — advertising a length the
+    body cannot reach would abort playback. The response simply stays open until
+    ffmpeg finishes, which is what Chromium expects from a growing stream.
+    Seeks are refused while growing (see to-do.md item 5).
+    """
+    part = download_manager.part_path(video_id) or path
+    bitrate = _current_bitrate()
+    gate = _AdaptiveGate(bitrate)
+
+    start_response("200 OK", [
+        ("Content-Type", "audio/mpeg"),
         ("Cache-Control", "no-store"),
-    ]
-    if total:
-        headers.append(("Content-Length", str(total)))
-    start_response("200 OK", headers)
+        ("Accept-Ranges", "none"),
+    ])
 
     def generate() -> Iterator[bytes]:
-        # Wait for the downloader to create its `.part` file before reading.
-        deadline = time.time() + 30.0
-        readable = _readable_path(path)
-        while not readable.exists():
-            if time.time() > deadline or not download_manager.is_active(video_id):
-                return
-            time.sleep(0.1)
-            readable = _readable_path(path)
+        deadline = time.monotonic() + 30.0
 
-        handle = _open_shared(readable)
-        handle.seek(start)
-        sent = 0
-        while total == 0 or sent < total:
-            # The `.part` file is renamed to the final name on completion.
-            if not readable.exists():
-                moved = _readable_path(path)
-                if moved != readable and moved.exists():
-                    handle.close()
-                    readable = moved
-                    handle = _open_shared(readable)
-                    handle.seek(start + sent)
-                    continue
-            available = readable.stat().st_size - start - sent
-            if available > 0:
-                block = handle.read(min(CHUNK, available))
-                if not block:
-                    break
-                sent += len(block)
-                yield block
-            elif download_manager.is_active(video_id):
-                time.sleep(0.2)
-            else:
+        # Wait for valid MP3 prefix (ID3v2 + frame sync), not arbitrary size
+        while time.monotonic() < deadline:
+            if _has_valid_mp3_prefix(part):
                 break
-        handle.close()
+            if not download_manager.is_active(video_id) and part.exists():
+                break
+            gate.tick(part)
+            time.sleep(0.02)
+        else:
+            return
+
+        # Adaptive gate: wait for measured throughput to produce enough bytes
+        want = gate.want()
+        while part.stat().st_size < want:
+            if time.monotonic() > deadline or not download_manager.is_active(video_id):
+                break
+            gate.tick(part)
+            time.sleep(0.02)
+
+        # Handles are opened per read and closed immediately, so ffmpeg is never
+        # blocked by us when it renames the finished file (Windows: WinError 32).
+        # When that rename happens mid-stream we follow the file to its new name.
+        source = part
+        sent = 0
+        last_size = -1
+        idle_since = time.monotonic()
+        try:
+            while True:
+                if not source.exists() and source != path and path.exists():
+                    source = path          # the .part was published as the final file
+                try:
+                    size = source.stat().st_size
+                except OSError:
+                    size = last_size
+                available = size - sent
+                if available > 0:
+                    _register_reader(str(source))
+                    try:
+                        with open(source, "rb") as handle:
+                            handle.seek(sent)
+                            block = handle.read(min(CHUNK, available))
+                    finally:
+                        _release_reader(str(source))
+                    if not block:
+                        time.sleep(0.05)
+                        continue
+                    sent += len(block)
+                    last_size = size
+                    idle_since = time.monotonic()
+                    yield block
+                elif download_manager.is_active(video_id):
+                    # safety net: a download that died without reporting must not
+                    # keep this response open forever
+                    if size != last_size:
+                        last_size = size
+                        idle_since = time.monotonic()
+                    elif time.monotonic() - idle_since > 30.0:
+                        return
+                    time.sleep(0.05)
+                else:
+                    break
+        except (PermissionError, FileNotFoundError):
+            return
 
     return generate()
+
+
+def _prepare_track(video_id: str) -> dict[str, Any]:
+    """Resolve a track and wait until a valid MP3 prefix is ready to stream."""
+    track = library_db.get_track(video_id)
+    if track is None:
+        return {"ready": False, "reason": "unknown track"}
+    if track.get("file_path"):
+        existing = Path(track["file_path"])
+        if existing.is_file():
+            return {"ready": True, "bytes": existing.stat().st_size}
+    part = download_manager.part_path(video_id)
+    if part and _has_valid_mp3_prefix(part):
+        return {"ready": True, "bytes": part.stat().st_size}
+    if not download_manager.is_active(video_id):
+        _ensure_downloading(video_id, track)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if part and _has_valid_mp3_prefix(part):
+            return {"ready": True, "bytes": part.stat().st_size}
+        if not download_manager.is_active(video_id):
+            break
+        time.sleep(0.02)
+    return {"ready": False, "reason": "timeout"}
+
+
+def _current_bitrate() -> int:
+    try:
+        return int(settings.get("bitrate") or 320)
+    except (TypeError, ValueError):
+        return 320
 
 
 def _skip(upstream, amount: int):
@@ -693,12 +828,27 @@ class Api:
         return search(query, offset, limit)
 
     def status(self) -> dict[str, Any]:
-        return {"cookies": bool(cookies_path()), "cookies_path": str(COOKIES_FILE)}
+        return {
+            "cookies": bool(cookies_path()),
+            "cookies_path": str(COOKIES_FILE),
+            "bitrate": _current_bitrate(),
+        }
+
+    def prepare_track(self, video_id: str) -> dict[str, Any]:
+        """Wait until /audio/<id> can serve a valid MP3 prefix."""
+        return _prepare_track(video_id)
+
+    def download_progress(self, video_id: str) -> dict[str, Any]:
+        return download_manager.get_progress(video_id)
 
     def play(self, video_id: str, title: str, url: str) -> dict[str, Any]:
         """Register a track and start downloading it (called by the GUI on play)."""
-        library_db.add_track(video_id, title, url, int(settings.get("bitrate") or 320))
-        track = library_db.get_track(video_id)
+        library_db.init_db()
+        track = library_db.get_or_create_track(video_id, title, url, int(settings.get("bitrate") or 320))
+        if track.get("status") == "mp3" and track.get("file_path"):
+            existing = Path(track["file_path"])
+            if existing.is_file() and existing.stat().st_size > 0:
+                return {"status": "mp3", "path": str(existing)}
         _ensure_downloading(video_id, track)
         return download_manager.get_progress(video_id)
 

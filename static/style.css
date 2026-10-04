@@ -204,6 +204,30 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 .extras { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 
+.mini-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #8a8a8a;
+  white-space: nowrap;
+}
+.mini-field input {
+  width: 34px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  background: #242424;
+  color: #fff;
+  font-size: 11px;
+  text-align: center;
+}
+.mini-field input:focus { border-color: #1db954; outline: none; }
+.mini-field input::-webkit-outer-spin-button,
+.mini-field input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.mini-field input[type=number] { -moz-appearance: textfield; }
+
 @media (max-width: 860px) {
   .player { grid-template-columns: minmax(110px, 1fr) minmax(240px, 2fr) auto; gap: 12px; padding: 0 14px; }
   .cookie-status { display: none; }

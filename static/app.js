@@ -41,6 +41,7 @@ function useBridge() {
     search: (q, offset, limit) => api.search(q, offset, limit),
     status: () => api.status(),
     play: (id, title, url) => api.play(id, title, url),
+    prepareTrack: (id) => api.prepare_track(id),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -82,7 +83,9 @@ function refreshStatus() {
   if (!backend) return;
   backend
     .status()
-    .then((data) => setCookieStatus(!!data.cookies))
+    .then((data) => {
+      setCookieStatus(!!data.cookies);
+    })
     .catch(() => setCookieStatus(false));
 }
 
@@ -209,6 +212,7 @@ function updateNowPlaying() {
 }
 
 async function playTrack(track) {
+  state.errorRetried = false;
   state.current = track;
   const idx = state.queue.findIndex((t) => t.id === track.id);
   if (idx === -1) state.queue.splice(Math.max(state.qIndex + 1, 0), 0, track);
@@ -220,6 +224,8 @@ async function playTrack(track) {
 
   scrubber.value = 0;
   currentTime.textContent = "0:00";
+  const knownDuration = Number(track.duration) || 0;
+  if (knownDuration > 0) scrubber.max = String(knownDuration);
 
   // Register the track and kick off the local-library download before playback,
   // so /audio/<id> can serve the file (or the partial file) from disk.
@@ -227,16 +233,61 @@ async function playTrack(track) {
     backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`).catch(() => {});
   }
 
+  // Wait until the server can serve a valid MP3 prefix before assigning src.
+  if (backend && backend.prepareTrack) {
+    try {
+      await backend.prepareTrack(track.id);
+    } catch (_) {}
+  }
+
   // The <audio> element cannot read from the Python bridge, so the bytes come
   // from the /audio route that pywebview serves from this same process.
+  audio.preload = "auto";
   audio.src = `/audio/${encodeURIComponent(track.id)}`;
-  try {
-    await audio.play();
-  } catch (err) {
-    if (err.name !== "AbortError") npChannel.textContent = `Playback failed: ${err.message}`;
-  }
+  await startPlayback();
   updateTransportState();
   updateRowStates();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function startPlayback() {
+  audio.load();
+
+  await new Promise((resolve, reject) => {
+    if (audio.readyState >= 2) return resolve();
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    const fail = () => {
+      if (done) return;
+      done = true;
+      reject(new Error(audio.error ? audio.error.message : "media error"));
+    };
+    audio.addEventListener("canplay", finish, { once: true });
+    audio.addEventListener("loadeddata", finish, { once: true });
+    audio.addEventListener("error", fail, { once: true });
+    setTimeout(finish, 3000);
+  });
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await audio.play();
+      return;
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      if (attempt === 2) {
+        npChannel.textContent = `Playback failed: ${err.message}`;
+        return;
+      }
+      await sleep(80);
+    }
+  }
 }
 
 function addToQueue(track) {
@@ -286,6 +337,18 @@ resultsList.addEventListener("click", (event) => {
   }
 });
 
+let hoverTimer = null;
+resultsList.addEventListener("mouseover", (event) => {
+  const row = event.target.closest(".row");
+  if (!row) return;
+  const track = trackById(row.dataset.id);
+  if (!track || !backend) return;
+  if (hoverTimer) clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => {
+    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`).catch(() => {});
+  }, 150);
+});
+
 queueList.addEventListener("click", (event) => {
   const remove = event.target.closest("[data-remove]");
   if (remove) {
@@ -331,8 +394,10 @@ audio.addEventListener("timeupdate", () => {
 
 audio.addEventListener("loadedmetadata", () => {
   const total = Number.isFinite(audio.duration) ? audio.duration : 0;
-  scrubber.max = String(total || 100);
-  durationTime.textContent = formatTime(total);
+  const knownDuration = Number(state.current && state.current.duration) || 0;
+  const displayDuration = knownDuration > 0 ? knownDuration : total;
+  if (displayDuration > 0) scrubber.max = String(displayDuration);
+  durationTime.textContent = formatTime(displayDuration);
 });
 
 audio.addEventListener("ended", () => {
@@ -345,7 +410,14 @@ audio.addEventListener("pause", () => { updateTransportState(); updateRowStates(
 audio.addEventListener("error", () => {
   updateRowStates();
   if (!state.current) return;
-  npChannel.textContent = "Stream unavailable (yt-dlp could not resolve audio)";
+  if (!state.errorRetried) {
+    state.errorRetried = true;
+    audio.load();
+    startPlayback().catch(() => {});
+    return;
+  }
+  state.errorRetried = false;
+  npChannel.textContent = "Stream unavailable";
 });
 
 scrubber.addEventListener("pointerdown", () => { scrubber.dataset.dragging = "1"; });

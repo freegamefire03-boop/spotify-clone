@@ -114,6 +114,11 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .link-button { background: none; border: none; color: #b3b3b3; cursor: pointer; font-size: 12px; text-decoration: underline; }
 .link-button:hover { color: #fff; }
 
+.bitrate-group { display: flex; border: 1px solid #3a3a3a; border-radius: 16px; overflow: hidden; }
+.bitrate-btn { background: transparent; border: none; color: #b3b3b3; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+.bitrate-btn:hover { color: #fff; }
+.bitrate-btn.active { background: #1db954; color: #06170c; font-weight: 600; }
+
 .more-wrap { display: flex; justify-content: center; padding: 18px 0 8px; }
 .more-button {
   padding: 10px 26px;
@@ -172,6 +177,12 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .now-playing { min-width: 0; }
 .np-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-channel { font-size: 12px; color: #b3b3b3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.np-download { margin-top: 6px; }
+.np-dl-bar { height: 3px; background: #333; border-radius: 2px; overflow: hidden; }
+.np-dl-fill { height: 100%; width: 0; background: #1db954; border-radius: 2px; transition: width .3s; }
+.np-dl-text { display: block; margin-top: 3px; font-size: 10px; color: #8a8a8a; font-variant-numeric: tabular-nums; }
+.np-download[hidden] { display: none; }
 
 .transport { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .buttons { display: flex; align-items: center; gap: 14px; }
@@ -240,3 +251,34 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   .volume { display: none; }
   .brand span:last-child { display: none; }
 }
+
+/* ---------- settings panel ---------- */
+.settings-panel {
+  position: fixed;
+  right: 18px;
+  bottom: 96px;
+  width: 280px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  border-radius: 10px;
+  box-shadow: 0 12px 30px rgba(0,0,0,.55);
+  z-index: 20;
+  padding: 10px 12px;
+}
+.settings-panel[hidden] { display: none; }
+.settings-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.setting-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; font-size: 13px; color: #ddd; }
+.setting-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #1db954; cursor: pointer; }
+.setting-row input[type="number"] {
+  width: 56px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  background: #242424;
+  color: #fff;
+  font-size: 12px;
+  text-align: center;
+}
+.setting-row input[type="number"]:focus { border-color: #1db954; outline: none; }
+.setting-row input[type="number"]:disabled { opacity: .4; cursor: not-allowed; }

@@ -59,9 +59,11 @@ _open_readers: dict[str, int] = {}
 _readers_lock = threading.Lock()
 
 
-def _on_download_finished(video_id: str, title: str, mp3_path: Path) -> None:
-    """The file is already a valid MP3 — nothing left to transcode."""
-    print(f"[library] saved {mp3_path.name}")
+def _on_download_finished(video_id: str, title: str, mp3_path: Optional[Path]) -> None:
+    if mp3_path:
+        print(f"[library] saved {mp3_path.name}")
+    else:
+        print(f"[library] {video_id} ready in memory")
 
 
 download_manager = downloader.DownloadManager(on_finished=_on_download_finished)
@@ -487,6 +489,103 @@ def _stream_from_youtube(start_response: Callable, video_id: str, range_header: 
 # --------------------------------------------------------------------------- #
 # local library: serve from disk, or stream a partial file while downloading
 # --------------------------------------------------------------------------- #
+def _has_valid_mp3_prefix_bytes(head: bytes) -> bool:
+    if len(head) < MIN_VALID_MP3_PREFIX:
+        return False
+    if head[:3] == b"ID3":
+        size = ((head[6] & 0x7F) << 21) | ((head[7] & 0x7F) << 14) | \
+               ((head[8] & 0x7F) << 7) | (head[9] & 0x7F)
+        offset = 10 + size
+        if offset >= len(head):
+            return False
+        return _find_mp3_sync(head[offset:offset + 4]) != -1
+    return _find_mp3_sync(head[:4]) != -1
+
+
+def _serve_memory_partial(
+    start_response: Callable, video_id: str, range_header: Optional[str]
+):
+    start_response("200 OK", [
+        ("Content-Type", "audio/mpeg"),
+        ("Cache-Control", "no-store"),
+        ("Accept-Ranges", "none"),
+    ])
+
+    def generate() -> Iterator[bytes]:
+        deadline = time.monotonic() + 30.0
+        sent = 0
+
+        while time.monotonic() < deadline:
+            if download_manager.buffer_size(video_id) >= MIN_VALID_MP3_PREFIX:
+                head = download_manager.buffer_head(video_id, MIN_VALID_MP3_PREFIX)
+                if _has_valid_mp3_prefix_bytes(head):
+                    break
+            if not download_manager.is_active(video_id):
+                break
+            time.sleep(0.02)
+        else:
+            return
+
+        last_size = -1
+        idle_since = time.monotonic()
+        while True:
+            if not download_manager.is_memory(video_id):
+                break
+            size = download_manager.buffer_size(video_id)
+            if size == 0 and not download_manager.is_active(video_id):
+                break
+            available = size - sent
+            if available > 0:
+                block = download_manager.buffer_slice(video_id, sent, min(CHUNK, available))
+                if block:
+                    sent += len(block)
+                    last_size = size
+                    idle_since = time.monotonic()
+                    yield block
+            elif download_manager.is_active(video_id):
+                if size != last_size:
+                    last_size = size
+                    idle_since = time.monotonic()
+                elif time.monotonic() - idle_since > 30.0:
+                    return
+                time.sleep(0.05)
+            else:
+                break
+
+    return generate()
+
+
+def _serve_memory_complete(
+    start_response: Callable, video_id: str, range_header: Optional[str]
+):
+    total = download_manager.buffer_size(video_id)
+    if total == 0:
+        start_response("404 Not Found", [("Content-Type", "text/plain")])
+        return [b"not in memory"]
+
+    window = _parse_range(range_header, total) if range_header else None
+    if window:
+        start, end = window
+        span = end - start + 1
+        data = download_manager.buffer_slice(video_id, start, span)
+        start_response("206 Partial Content", [
+            ("Content-Type", "audio/mpeg"),
+            ("Content-Range", f"bytes {start}-{end}/{total}"),
+            ("Content-Length", str(span)),
+            ("Accept-Ranges", "bytes"),
+            ("Cache-Control", "no-store"),
+        ])
+        return [data]
+    data = download_manager.buffer_slice(video_id, 0, total)
+    start_response("200 OK", [
+        ("Content-Type", "audio/mpeg"),
+        ("Content-Length", str(total)),
+        ("Accept-Ranges", "bytes"),
+        ("Cache-Control", "no-store"),
+    ])
+    return [data]
+
+
 def _audio_response(start_response: Callable, video_id: str, range_header: Optional[str]):
     track = library_db.get_track(video_id)
 
@@ -496,13 +595,25 @@ def _audio_response(start_response: Callable, video_id: str, range_header: Optio
         if existing.is_file():
             return _serve_file(start_response, existing, range_header)
 
-    # 2. Otherwise make sure a download is running, then stream the partial.
+    # 2. Memory mode: serve from in-memory buffer
+    if download_manager.is_memory(video_id):
+        if download_manager.is_active(video_id):
+            return _serve_memory_partial(start_response, video_id, range_header)
+        else:
+            return _serve_memory_complete(start_response, video_id, range_header)
+
+    # 3. Track is memory-only (status="memory") but buffer not loaded -> re-download
+    if track and track.get("status") == "memory":
+        _ensure_downloading(video_id, track)
+        return _serve_memory_partial(start_response, video_id, range_header)
+
+    # 4. Otherwise make sure a download is running, then stream the partial.
     partial = _ensure_downloading(video_id, track)
     if partial is not None:
         total = int(download_manager.get_progress(video_id).get("total") or 0)
         return _serve_partial(start_response, video_id, partial, total, range_header)
 
-    # 3. No title/url known -> fall back to proxying YouTube.
+    # 5. No title/url known -> fall back to proxying YouTube.
     return _stream_from_youtube(start_response, video_id, range_header)
 
 
@@ -515,7 +626,8 @@ def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]]) -> Optio
     title = track.get("title") or video_id
     url = track.get("url") or f"https://www.youtube.com/watch?v={video_id}"
     bitrate = _current_bitrate()
-    return download_manager.start(video_id, title, url, bitrate)
+    memory = bool(settings.get("memory_mode"))
+    return download_manager.start(video_id, title, url, bitrate, memory_mode=memory)
 
 
 def _open_shared(path: Path, mode: str = "rb"):
@@ -745,6 +857,27 @@ def _prepare_track(video_id: str) -> dict[str, Any]:
         existing = Path(track["file_path"])
         if existing.is_file():
             return {"ready": True, "bytes": existing.stat().st_size}
+
+    if download_manager.is_memory(video_id):
+        size = download_manager.buffer_size(video_id)
+        if size >= MIN_VALID_MP3_PREFIX:
+            head = download_manager.buffer_head(video_id, MIN_VALID_MP3_PREFIX)
+            if _has_valid_mp3_prefix_bytes(head):
+                return {"ready": True, "bytes": size}
+        if not download_manager.is_active(video_id):
+            _ensure_downloading(video_id, track)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            size = download_manager.buffer_size(video_id)
+            if size >= MIN_VALID_MP3_PREFIX:
+                head = download_manager.buffer_head(video_id, MIN_VALID_MP3_PREFIX)
+                if _has_valid_mp3_prefix_bytes(head):
+                    return {"ready": True, "bytes": size}
+            if not download_manager.is_active(video_id):
+                break
+            time.sleep(0.02)
+        return {"ready": False, "reason": "timeout"}
+
     part = download_manager.part_path(video_id)
     if part and _has_valid_mp3_prefix(part):
         return {"ready": True, "bytes": part.stat().st_size}
@@ -840,6 +973,30 @@ class Api:
 
     def download_progress(self, video_id: str) -> dict[str, Any]:
         return download_manager.get_progress(video_id)
+
+    def set_bitrate(self, value: int) -> dict[str, Any]:
+        settings.set("bitrate", int(value))
+        return {"ok": True, "bitrate": int(value)}
+
+    def get_settings(self) -> dict[str, Any]:
+        return {
+            "memory_mode": bool(settings.get("memory_mode")),
+            "continue_current": bool(settings.get("continue_current")),
+            "queue_depth": int(settings.get("queue_depth") or 0),
+        }
+
+    def set_memory_mode(self, value: bool) -> dict[str, Any]:
+        settings.set("memory_mode", bool(value))
+        return {"ok": True}
+
+    def set_continue_current(self, value: bool) -> dict[str, Any]:
+        settings.set("continue_current", bool(value))
+        return {"ok": True}
+
+    def set_queue_depth(self, value: int) -> dict[str, Any]:
+        depth = max(1, int(value))
+        settings.set("queue_depth", depth)
+        return {"ok": True, "queue_depth": depth}
 
     def play(self, video_id: str, title: str, url: str) -> dict[str, Any]:
         """Register a track and start downloading it (called by the GUI on play)."""

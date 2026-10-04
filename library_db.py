@@ -170,6 +170,7 @@ def reconcile_stale_downloads() -> dict[str, int]:
                 (video_id,),
             )
             failed += 1
+        conn.execute("DELETE FROM tracks WHERE status = 'memory'")
         conn.commit()
     return {"repaired": repaired, "failed": failed}
 
@@ -190,3 +191,11 @@ def count_by_status(status: str) -> int:
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) FROM tracks WHERE status = ?", (status,)).fetchone()
         return int(row[0]) if row else 0
+
+
+def cleanup_memory_tracks() -> int:
+    """Remove memory-only tracks from DB (call on app exit)."""
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM tracks WHERE status = 'memory'")
+        conn.commit()
+        return cur.rowcount

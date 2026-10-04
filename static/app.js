@@ -23,6 +23,13 @@ const queueList = document.getElementById("queueList");
 const queueCount = document.getElementById("queueCount");
 const clearQueue = document.getElementById("clearQueue");
 const closeQueue = document.getElementById("closeQueue");
+const bitrateBtns = document.querySelectorAll(".bitrate-btn");
+const settingsButton = document.getElementById("settingsButton");
+const settingsPanel = document.getElementById("settingsPanel");
+const closeSettings = document.getElementById("closeSettings");
+const memoryMode = document.getElementById("memoryMode");
+const continueCurrent = document.getElementById("continueCurrent");
+const queueDepth = document.getElementById("queueDepth");
 
 const PAGE = 10;
 const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false };
@@ -42,6 +49,12 @@ function useBridge() {
     status: () => api.status(),
     play: (id, title, url) => api.play(id, title, url),
     prepareTrack: (id) => api.prepare_track(id),
+    setBitrate: (val) => api.set_bitrate(val),
+    downloadProgress: (id) => api.download_progress(id),
+    getSettings: () => api.get_settings(),
+    setMemoryMode: (val) => api.set_memory_mode(val),
+    setContinueCurrent: (val) => api.set_continue_current(val),
+    setQueueDepth: (val) => api.set_queue_depth(val),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -54,6 +67,20 @@ window.addEventListener("pywebviewready", useBridge);
 if (!useBridge()) {
   cookieStatus.textContent = "starting...";
 }
+
+function focusSearch() {
+  searchInput.focus();
+  searchInput.select();
+}
+
+focusSearch();
+
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "l") {
+    event.preventDefault();
+    focusSearch();
+  }
+});
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
@@ -85,8 +112,37 @@ function refreshStatus() {
     .status()
     .then((data) => {
       setCookieStatus(!!data.cookies);
+      initBitrate(data);
     })
     .catch(() => setCookieStatus(false));
+}
+
+function initBitrate(status) {
+  const bitrate = status.bitrate || 320;
+  bitrateBtns.forEach(b => b.classList.toggle("active", Number(b.dataset.bitrate) === bitrate));
+}
+
+bitrateBtns.forEach(btn => {
+  btn.addEventListener("click", () => {
+    const val = Number(btn.dataset.bitrate);
+    bitrateBtns.forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    backend.setBitrate(val);
+  });
+});
+
+function openSettings() {
+  settingsPanel.hidden = false;
+  backend.getSettings().then((s) => {
+    memoryMode.checked = !!s.memory_mode;
+    continueCurrent.checked = !!s.continue_current;
+    queueDepth.value = Number(s.queue_depth) || 0;
+    queueDepth.disabled = !continueCurrent.checked;
+  }).catch(() => {});
+}
+
+function closeSettingsPanel() {
+  settingsPanel.hidden = true;
 }
 
 function rowMarkup(track) {
@@ -222,6 +278,10 @@ async function playTrack(track) {
   renderQueue();
   updateRowStates();
 
+  if (backend && backend.downloadProgress) {
+    startDlPolling(track.id);
+  }
+
   scrubber.value = 0;
   currentTime.textContent = "0:00";
   const knownDuration = Number(track.duration) || 0;
@@ -251,6 +311,59 @@ async function playTrack(track) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let dlPollTimer = null;
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function stopDlPolling() {
+  if (dlPollTimer) { clearInterval(dlPollTimer); dlPollTimer = null; }
+}
+
+function startDlPolling(videoId) {
+  stopDlPolling();
+  const el = document.getElementById("npDownload");
+  const fill = document.getElementById("npDlFill");
+  const text = document.getElementById("npDlText");
+  el.hidden = false;
+  fill.style.width = "0%";
+  text.textContent = "Starting download...";
+
+  dlPollTimer = setInterval(async () => {
+    if (!backend) return;
+    try {
+      const data = await backend.downloadProgress(videoId);
+      const status = data.status || "unknown";
+      const written = Number(data.written) || 0;
+      const total = Number(data.total) || 0;
+      const pct = total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0;
+
+      if (status === "downloading") {
+        fill.style.width = pct + "%";
+        text.textContent = total > 0
+          ? `${formatBytes(written)} / ${formatBytes(total)} (${pct}%)`
+          : `${formatBytes(written)} downloaded`;
+      } else if (status === "done") {
+        fill.style.width = "100%";
+        text.textContent = "Download complete";
+        stopDlPolling();
+        setTimeout(() => { el.hidden = true; }, 2000);
+      } else if (status === "failed" || status === "cancelled") {
+        text.textContent = status === "failed" ? "Download failed" : "Download cancelled";
+        stopDlPolling();
+        setTimeout(() => { el.hidden = true; }, 2000);
+      }
+    } catch (_) {
+      stopDlPolling();
+      el.hidden = true;
+    }
+  }, 1000);
 }
 
 async function startPlayback() {
@@ -384,6 +497,24 @@ clearQueue.addEventListener("click", () => {
   state.qIndex = -1;
   renderQueue();
   updateRowStates();
+});
+
+settingsButton.addEventListener("click", openSettings);
+closeSettings.addEventListener("click", closeSettingsPanel);
+
+memoryMode.addEventListener("change", () => {
+  backend.setMemoryMode(memoryMode.checked);
+});
+
+continueCurrent.addEventListener("change", () => {
+  backend.setContinueCurrent(continueCurrent.checked);
+  queueDepth.disabled = !continueCurrent.checked;
+});
+
+queueDepth.addEventListener("change", () => {
+  const val = Math.max(1, Math.floor(Number(queueDepth.value) || 1));
+  queueDepth.value = val;
+  backend.setQueueDepth(val);
 });
 
 audio.addEventListener("timeupdate", () => {

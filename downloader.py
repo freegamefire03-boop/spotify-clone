@@ -24,6 +24,13 @@ import library_db
 
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
 
+# Playback-aware pacing: keep this many seconds of audio buffered ahead of the
+# playhead. The download gate pauses the ffmpeg-stdout pump when secured audio
+# reaches playhead + BUFFER_AHEAD_SEC, and resumes with hysteresis.
+BUFFER_AHEAD_SEC = 10.0
+RESUME_HYSTERESIS_SEC = 2.0
+GATE_POLL_SEC = 0.2
+
 
 def cookies_file() -> Optional[str]:
     try:
@@ -105,6 +112,8 @@ class DownloadManager:
                     "started": time.time(),
                     "memory": True,
                     "buffer": io.BytesIO(),
+                    "playhead": 0.0,
+                    "gated": False,
                 }
             library_db.update_track(video_id, status="downloading")
             thread = threading.Thread(
@@ -131,10 +140,12 @@ class DownloadManager:
                 "bitrate": bitrate,
                 "path": str(final_path),
                 "part": str(part_path),
-                "cancel": False,
-                "proc": None,
-                "started": time.time(),
-            }
+                    "cancel": False,
+                    "proc": None,
+                    "started": time.time(),
+                    "playhead": 0.0,
+                    "gated": False,
+                }
         library_db.update_track(video_id, file_path=str(final_path), status="downloading")
 
         thread = threading.Thread(
@@ -159,6 +170,11 @@ class DownloadManager:
                 rec["written"] = Path(rec["part"]).stat().st_size
             except OSError:
                 pass
+        bitrate = int(rec.get("bitrate") or 0)
+        bps = bitrate * 1000 / 8 if bitrate > 0 else 0
+        rec["playhead"] = float(rec.get("playhead") or 0.0)
+        rec["buffered_sec"] = (int(rec.get("written") or 0) / bps) if bps > 0 else 0.0
+        rec["gated"] = bool(rec.get("gated"))
         return rec
 
     def part_path(self, video_id: str) -> Optional[Path]:
@@ -174,6 +190,55 @@ class DownloadManager:
         with self._lock:
             rec = self._downloads.get(video_id)
         return bool(rec) and rec.get("memory", False)
+
+    def is_gated(self, video_id: str) -> bool:
+        with self._lock:
+            rec = self._downloads.get(video_id)
+        return bool(rec) and rec.get("gated", False)
+
+    def report_playhead(self, video_id: str, seconds: float) -> dict[str, Any]:
+        """Record the player's playhead; returns current pacing state."""
+        try:
+            seconds = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        with self._lock:
+            rec = self._downloads.get(video_id)
+            if rec is None:
+                return {"gated": False}
+            rec["playhead"] = seconds
+            gated = bool(rec.get("gated"))
+            written = int(rec.get("written") or 0)
+            bitrate = int(rec.get("bitrate") or 0)
+        bps = bitrate * 1000 / 8 if bitrate > 0 else 0
+        secured = written / bps if bps > 0 else 0.0
+        return {"gated": gated, "secured": secured, "target": seconds + BUFFER_AHEAD_SEC}
+
+    def _wants_pause(self, rec: dict[str, Any]) -> bool:
+        """Pure pacing math with a hysteresis latch (caller holds no lock).
+
+        True = stop reading ffmpeg stdout (pipe backpressure pauses ffmpeg).
+        `continue_current` ON, unknown bitrate, or finished downloads never gate.
+        """
+        if rec.get("status") != "downloading":
+            return False
+        try:
+            import settings as _settings
+
+            if bool(_settings.get("continue_current")):
+                return False
+        except Exception:  # noqa: BLE001 - settings unreadable: stay ungated
+            return False
+        bitrate = int(rec.get("bitrate") or 0)
+        if bitrate <= 0:
+            return False
+        bps = bitrate * 1000 / 8
+        secured = float(rec.get("written") or 0) / bps
+        target = float(rec.get("playhead") or 0.0) + BUFFER_AHEAD_SEC
+        if rec.get("gated"):
+            # latched shut: stay shut until the buffer drains past hysteresis
+            return secured >= target - RESUME_HYSTERESIS_SEC
+        return secured >= target
 
     def get_buffer(self, video_id: str) -> Optional[io.BytesIO]:
         with self._lock:
@@ -388,6 +453,19 @@ class DownloadManager:
             if stream is None:
                 raise RuntimeError("ffmpeg stdout not available")
             while True:
+                with self._lock:
+                    rec = self._downloads.get(video_id)
+                    if rec is None:
+                        break
+                    if rec.get("cancel"):
+                        break
+                    pause = self._wants_pause(rec)
+                    rec["gated"] = pause
+                if pause:
+                    # Gate shut: don't read -> ffmpeg blocks on the full pipe
+                    # buffer (backpressure) and stops consuming the network.
+                    time.sleep(GATE_POLL_SEC)
+                    continue
                 chunk = stream.read(65536)
                 if not chunk:
                     break
@@ -466,11 +544,15 @@ class DownloadManager:
 
             if not direct:
                 raise RuntimeError("could not resolve a direct audio URL")
-            cmd = self._build_cmd(direct, headers, part_path, bitrate)
+            # Pumped mode: ffmpeg writes MP3 to stdout, Python writes the
+            # .part file. Closing the gate (not reading) lets pipe
+            # backpressure stall ffmpeg — a pause that works on Windows
+            # with stdlib only (no SIGSTOP, no psutil).
+            cmd = self._build_cmd_memory(direct, headers, bitrate)
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
@@ -478,6 +560,32 @@ class DownloadManager:
                 rec = self._downloads.get(video_id)
                 if rec is not None:
                     rec["proc"] = proc
+
+            stream = proc.stdout
+            if stream is None:
+                raise RuntimeError("ffmpeg stdout not available")
+            with open(part_path, "wb") as out:
+                while True:
+                    with self._lock:
+                        rec = self._downloads.get(video_id)
+                        if rec is None:
+                            break
+                        if rec.get("cancel"):
+                            break
+                        pause = self._wants_pause(rec)
+                        rec["gated"] = pause
+                    if pause:
+                        time.sleep(GATE_POLL_SEC)
+                        continue
+                    chunk = stream.read(65536)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    out.flush()
+                    with self._lock:
+                        rec = self._downloads.get(video_id)
+                        if rec is not None:
+                            rec["written"] = int(rec.get("written") or 0) + len(chunk)
 
             stderr = proc.communicate()[1]
             code = proc.returncode

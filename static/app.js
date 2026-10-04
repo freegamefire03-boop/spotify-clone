@@ -55,6 +55,7 @@ function useBridge() {
     setMemoryMode: (val) => api.set_memory_mode(val),
     setContinueCurrent: (val) => api.set_continue_current(val),
     setQueueDepth: (val) => api.set_queue_depth(val),
+    reportPlayhead: (id, s) => api.report_playhead(id, s),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -270,6 +271,8 @@ function updateNowPlaying() {
 async function playTrack(track) {
   state.errorRetried = false;
   state.current = track;
+  lastPlayheadSent = -10;
+  lastPlayheadAt = 0;
   const idx = state.queue.findIndex((t) => t.id === track.id);
   if (idx === -1) state.queue.splice(Math.max(state.qIndex + 1, 0), 0, track);
   state.qIndex = state.queue.findIndex((t) => t.id === track.id);
@@ -517,11 +520,28 @@ queueDepth.addEventListener("change", () => {
   backend.setQueueDepth(val);
 });
 
+let lastPlayheadSent = -10;
+let lastPlayheadAt = 0;
+
+function sendPlayhead(force) {
+  if (!state.current || !backend || !backend.reportPlayhead) return;
+  const now = Date.now();
+  const pos = Number(audio.currentTime) || 0;
+  if (!force && Math.abs(pos - lastPlayheadSent) < 1.0 && now - lastPlayheadAt < 2000) return;
+  lastPlayheadSent = pos;
+  lastPlayheadAt = now;
+  backend.reportPlayhead(state.current.id, pos).catch(() => {});
+}
+
 audio.addEventListener("timeupdate", () => {
   if (scrubber.dataset.dragging === "1") return;
   scrubber.value = audio.currentTime;
   currentTime.textContent = formatTime(audio.currentTime);
+  sendPlayhead(false);
 });
+
+audio.addEventListener("seeked", () => sendPlayhead(true));
+audio.addEventListener("play", () => sendPlayhead(true));
 
 audio.addEventListener("loadedmetadata", () => {
   const total = Number.isFinite(audio.duration) ? audio.duration : 0;

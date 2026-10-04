@@ -546,6 +546,8 @@ def _serve_memory_partial(
                 if size != last_size:
                     last_size = size
                     idle_since = time.monotonic()
+                elif download_manager.is_gated(video_id):
+                    idle_since = time.monotonic()
                 elif time.monotonic() - idle_since > 30.0:
                     return
                 time.sleep(0.05)
@@ -833,9 +835,14 @@ def _serve_partial(
                     yield block
                 elif download_manager.is_active(video_id):
                     # safety net: a download that died without reporting must not
-                    # keep this response open forever
+                    # keep this response open forever. A buffer-gated (paced)
+                    # download legitimately shows no growth while the user
+                    # listens to the secured 10s, so the watchdog is suspended
+                    # while gated.
                     if size != last_size:
                         last_size = size
+                        idle_since = time.monotonic()
+                    elif download_manager.is_gated(video_id):
                         idle_since = time.monotonic()
                     elif time.monotonic() - idle_since > 30.0:
                         return
@@ -974,6 +981,12 @@ class Api:
     def download_progress(self, video_id: str) -> dict[str, Any]:
         return download_manager.get_progress(video_id)
 
+    def report_playhead(self, video_id: str, seconds: float) -> dict[str, Any]:
+        try:
+            return download_manager.report_playhead(video_id, float(seconds))
+        except (TypeError, ValueError):
+            return {"gated": False}
+
     def set_bitrate(self, value: int) -> dict[str, Any]:
         settings.set("bitrate", int(value))
         return {"ok": True, "bitrate": int(value)}
@@ -1007,6 +1020,9 @@ class Api:
             if existing.is_file() and existing.stat().st_size > 0:
                 return {"status": "mp3", "path": str(existing)}
         _ensure_downloading(video_id, track)
+        # Fresh play from byte 0: drop any stale playhead from a previous listen
+        # so the 10s-ahead gate doesn't start shut.
+        download_manager.report_playhead(video_id, 0.0)
         return download_manager.get_progress(video_id)
 
     def resolve(self, video_id: str) -> dict[str, Any]:

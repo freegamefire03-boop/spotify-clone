@@ -56,6 +56,8 @@ function useBridge() {
     setContinueCurrent: (val) => api.set_continue_current(val),
     setQueueDepth: (val) => api.set_queue_depth(val),
     reportPlayhead: (id, s) => api.report_playhead(id, s),
+    pauseDownload: (id) => api.pause_download(id),
+    resumeDownload: (id) => api.resume_download(id),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -556,8 +558,19 @@ audio.addEventListener("ended", () => {
   updateTransportState();
 });
 
-audio.addEventListener("play", () => { updateTransportState(); updateRowStates(); });
-audio.addEventListener("pause", () => { updateTransportState(); updateRowStates(); });
+audio.addEventListener("play", () => {
+  updateTransportState();
+  updateRowStates();
+  if (state.current && backend && backend.resumeDownload)
+    backend.resumeDownload(state.current.id).catch(() => {});
+  sendPlayhead(true);
+});
+audio.addEventListener("pause", () => {
+  updateTransportState();
+  updateRowStates();
+  if (state.current && backend && backend.pauseDownload)
+    backend.pauseDownload(state.current.id).catch(() => {});
+});
 audio.addEventListener("error", () => {
   updateRowStates();
   if (!state.current) return;

@@ -987,6 +987,15 @@ class Api:
         except (TypeError, ValueError):
             return {"gated": False}
 
+    def pause_download(self, video_id: str) -> dict[str, Any]:
+        return download_manager.pause_download(video_id)
+
+    def resume_download(self, video_id: str) -> dict[str, Any]:
+        return download_manager.resume_download(video_id)
+
+    def set_paused(self, video_id: str, paused: bool) -> dict[str, Any]:
+        return download_manager.set_paused(video_id, bool(paused))
+
     def set_bitrate(self, value: int) -> dict[str, Any]:
         settings.set("bitrate", int(value))
         return {"ok": True, "bitrate": int(value)}
@@ -1020,9 +1029,10 @@ class Api:
             if existing.is_file() and existing.stat().st_size > 0:
                 return {"status": "mp3", "path": str(existing)}
         _ensure_downloading(video_id, track)
-        # Fresh play from byte 0: drop any stale playhead from a previous listen
-        # so the 10s-ahead gate doesn't start shut.
+        # Fresh play from byte 0: drop any stale playhead / paused flag from a
+        # previous listen so the 10s-ahead gate doesn't start shut.
         download_manager.report_playhead(video_id, 0.0)
+        download_manager.set_paused(video_id, False)
         return download_manager.get_progress(video_id)
 
     def resolve(self, video_id: str) -> dict[str, Any]:

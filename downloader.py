@@ -175,6 +175,7 @@ class DownloadManager:
         rec["playhead"] = float(rec.get("playhead") or 0.0)
         rec["buffered_sec"] = (int(rec.get("written") or 0) / bps) if bps > 0 else 0.0
         rec["gated"] = bool(rec.get("gated"))
+        rec["paused"] = bool(rec.get("paused"))
         return rec
 
     def part_path(self, video_id: str) -> Optional[Path]:
@@ -235,6 +236,11 @@ class DownloadManager:
         bps = bitrate * 1000 / 8
         secured = float(rec.get("written") or 0) / bps
         target = float(rec.get("playhead") or 0.0) + BUFFER_AHEAD_SEC
+        if rec.get("paused"):
+            # Paused: top up to the FULL 10s margin, then hold shut.
+            # Ignores the 2s hysteresis slack on purpose (normal playback
+            # resumes at target-2s; pause must secure the full target).
+            return secured >= target
         if rec.get("gated"):
             # latched shut: stay shut until the buffer drains past hysteresis
             return secured >= target - RESUME_HYSTERESIS_SEC
@@ -284,8 +290,33 @@ class DownloadManager:
         if proc and proc.poll() is None:
             proc.terminate()
 
+    def set_paused(self, video_id: str, paused: bool) -> dict[str, Any]:
+        """Freeze/unfreeze a download in place (never abandons progress).
+
+        The pump loops notice within GATE_POLL_SEC and stall/resume ffmpeg
+        via pipe backpressure. Partial file, buffer, DB row, and process
+        are left untouched.
+        """
+        with self._lock:
+            rec = self._downloads.get(video_id)
+            if rec is None or rec.get("status") != "downloading":
+                return {"ok": False, "reason": "not-downloading"}
+            rec["paused"] = bool(paused)
+            return {"ok": True, "paused": bool(paused), "gated": bool(rec.get("gated"))}
+
+    def pause_download(self, video_id: str) -> dict[str, Any]:
+        return self.set_paused(video_id, True)
+
+    def resume_download(self, video_id: str) -> dict[str, Any]:
+        return self.set_paused(video_id, False)
+
+    def is_paused(self, video_id: str) -> bool:
+        with self._lock:
+            rec = self._downloads.get(video_id)
+        return bool(rec) and rec.get("paused", False)
+
     def pause(self, video_id: str) -> None:
-        self.cancel(video_id)
+        self.set_paused(video_id, True)
 
     # ----------------------------------------------------------------- private
     def _validate_output(self, path: Path) -> bool:

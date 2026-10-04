@@ -13,8 +13,7 @@ DEFAULTS: dict[str, Any] = {
     "bitrate": 320,          # MP3 quality: 128 / 192 / 320
     "library_dir": None,     # None = default (Music folder)
     "memory_mode": False,    # don't save new audios to disk
-    "continue_current": False,  # option 1: uncapped current-track download
-    "queue_depth": 0,        # option 0: how many queue items to secure (0 = off)
+    "queue_depth": 3,        # how many queue items to pre-download (0 = off)
     "download_workers": 3,   # total encode lanes: 1 foreground + rest background
     "session_queue": [],     # last session's queue items (id/title/channel/duration/thumbnail)
     "session_qindex": -1,    # index of current track in session_queue

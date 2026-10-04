@@ -13,8 +13,9 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core import Api, application  # noqa: E402
+from core import Api, application, setup_logging  # noqa: E402
 import library_db  # noqa: E402
+import logging
 
 WINDOW_TITLE = "Spotify Clone"
 PID_FILE = ROOT / "spotify-clone.pid"
@@ -35,12 +36,14 @@ def _log_startup_error() -> None:
 
 def main() -> int:
     _write_pid()
+    setup_logging()
+    log = logging.getLogger("spotify")
     try:
         # Create the library table before any request or bridge call can touch it.
         library_db.init_db()
         # Reconcile stale downloads + orphaned .part files from previous sessions
         stats = library_db.reconcile_stale_downloads()
-        print(f"[startup] reconcile {stats}")
+        log.info("startup reconcile %s", stats)
 
         # The WSGI app goes in as the `url` argument: pywebview detects a
         # callable, runs it in a daemon thread in THIS process on a random

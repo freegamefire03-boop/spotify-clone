@@ -10,6 +10,7 @@ into place, so the stored file is always a complete, valid MP3.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import queue
 import subprocess
@@ -25,6 +26,8 @@ import library
 import library_db
 
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
+
+log = logging.getLogger("spotify.downloader")
 
 FG_PRIORITY = 0  # foreground lane: current track, never waits behind prefetch
 BG_PRIORITY = 1  # background lane: queue prefetch
@@ -42,13 +45,20 @@ class AudioJob:
     part_path: Optional[Path]  # None for memory jobs
     final_path: Optional[Path]  # None for memory jobs
     priority: int  # FG_PRIORITY or BG_PRIORITY
+    gen: int = 0  # download generation: stale queued jobs drop at dispatch
 
-# Playback-aware pacing: keep this many seconds of audio buffered ahead of the
-# playhead. The download gate pauses the ffmpeg-stdout pump when secured audio
-# reaches playhead + BUFFER_AHEAD_SEC, and resumes with hysteresis.
-BUFFER_AHEAD_SEC = 10.0
-RESUME_HYSTERESIS_SEC = 2.0
-GATE_POLL_SEC = 0.2
+# Uncapped downloading (wifi-first): the pump reads ffmpeg stdout as fast as
+# the connection allows until EOF. No ahead-of-playhead cap.
+# Stall watchdog: first-byte grace after spawn, then any inter-byte gap this
+# long with zero new bytes (while unpaused/uncancelled) fails the job so a
+# stuck ffmpeg can never wedge a worker lane forever.
+FIRST_BYTE_GRACE_SEC = 30.0
+STALL_TIMEOUT_SEC = 10.0
+PAUSE_POLL_SEC = 0.2
+# Upper bound for the (blocking) direct-URL resolve step. The resolve runs in
+# a short-lived daemon thread per job; exceeding this frees the lane while a
+# generation token stops the late result from spawning ffmpeg afterwards.
+RESOLVE_TIMEOUT_SEC = 60.0
 
 
 def cookies_file() -> Optional[str]:
@@ -118,7 +128,7 @@ class DownloadManager:
             try:
                 self._dispatch(job)
             except Exception as exc:  # noqa: BLE001 - a worker must never die
-                print(f"[downloader] worker error {job.video_id}: {exc}")
+                log.warning("worker error %s: %s", job.video_id, exc)
             finally:
                 q.task_done()
 
@@ -134,11 +144,15 @@ class DownloadManager:
                 except Exception:  # noqa: BLE001 - DB write must not kill a worker
                     pass
                 return
+            if int(rec.get("gen") or 0) != job.gen:
+                # Superseded while queued (a newer start() re-registered this
+                # id): drop quietly. The newer generation has its own job.
+                return
         if job.memory_mode:
-            self._run_memory(job.video_id, job.title, job.url, job.bitrate)
+            self._run_memory(job.video_id, job.title, job.url, job.bitrate, job.gen)
         else:
             assert job.part_path is not None and job.final_path is not None
-            self._run(job.video_id, job.title, job.url, job.part_path, job.final_path, job.bitrate)
+            self._run(job.video_id, job.title, job.url, job.part_path, job.final_path, job.bitrate, job.gen)
 
     def _enqueue(self, job: AudioJob) -> None:
         (self._fg_queue if job.priority == FG_PRIORITY else self._bg_queue).put(job)
@@ -146,6 +160,18 @@ class DownloadManager:
     @property
     def worker_count(self) -> int:
         return len(self._workers)
+
+    def lane_status(self) -> dict[str, int]:
+        """Queue depths per lane (observability: wedged lanes are visible)."""
+        try:
+            fg = self._fg_queue.qsize()
+        except NotImplementedError:
+            fg = -1
+        try:
+            bg = self._bg_queue.qsize()
+        except NotImplementedError:
+            bg = -1
+        return {"fg_queued": fg, "bg_queued": bg, "workers": len(self._workers)}
 
     # ------------------------------------------------------------------ public
     def start(
@@ -183,6 +209,8 @@ class DownloadManager:
 
         if memory_mode:
             with self._lock:
+                prev = self._downloads.get(video_id)
+                gen = int((prev.get("gen") if prev else 0) or 0) + 1
                 self._downloads[video_id] = {
                     "status": "downloading",
                     "written": 0,
@@ -199,9 +227,10 @@ class DownloadManager:
                     "playhead": 0.0,
                     "gated": False,
                     "paused": False,
+                    "gen": gen,
                 }
             library_db.update_track(video_id, status="downloading")
-            self._enqueue(AudioJob(video_id, title, url, bitrate, True, None, None, priority))
+            self._enqueue(AudioJob(video_id, title, url, bitrate, True, None, None, priority, gen))
             return None
 
         final_path = self._reserve_path(video_id, title, "mp3")
@@ -211,6 +240,8 @@ class DownloadManager:
         # concurrent /audio/<id> request sees is_active() == False and starts a
         # second download of the same file (two ffmpeg processes, one .part).
         with self._lock:
+            prev = self._downloads.get(video_id)
+            gen = int((prev.get("gen") if prev else 0) or 0) + 1
             self._downloads[video_id] = {
                 "status": "downloading",
                 "written": 0,
@@ -223,12 +254,13 @@ class DownloadManager:
                 "proc": None,
                 "started": time.time(),
                 "playhead": 0.0,
-                "gated": False,
-                "paused": False,
-            }
+                    "gated": False,
+                    "paused": False,
+                    "gen": gen,
+                }
         library_db.update_track(video_id, file_path=str(final_path), status="downloading")
 
-        self._enqueue(AudioJob(video_id, title, url, bitrate, False, part_path, final_path, priority))
+        self._enqueue(AudioJob(video_id, title, url, bitrate, False, part_path, final_path, priority, gen))
         return part_path
 
     def get_progress(self, video_id: str) -> dict[str, Any]:
@@ -248,7 +280,7 @@ class DownloadManager:
         bps = bitrate * 1000 / 8 if bitrate > 0 else 0
         rec["playhead"] = float(rec.get("playhead") or 0.0)
         rec["buffered_sec"] = (int(rec.get("written") or 0) / bps) if bps > 0 else 0.0
-        rec["gated"] = bool(rec.get("gated"))
+        rec["gated"] = False  # pacing removed; key kept for GUI compat
         rec["paused"] = bool(rec.get("paused"))
         return rec
 
@@ -266,13 +298,8 @@ class DownloadManager:
             rec = self._downloads.get(video_id)
         return bool(rec) and rec.get("memory", False)
 
-    def is_gated(self, video_id: str) -> bool:
-        with self._lock:
-            rec = self._downloads.get(video_id)
-        return bool(rec) and rec.get("gated", False)
-
     def report_playhead(self, video_id: str, seconds: float) -> dict[str, Any]:
-        """Record the player's playhead; returns current pacing state."""
+        """Record the player's playhead (stored only; downloads are uncapped)."""
         try:
             seconds = max(0.0, float(seconds))
         except (TypeError, ValueError):
@@ -282,43 +309,19 @@ class DownloadManager:
             if rec is None:
                 return {"gated": False}
             rec["playhead"] = seconds
-            gated = bool(rec.get("gated"))
             written = int(rec.get("written") or 0)
             bitrate = int(rec.get("bitrate") or 0)
         bps = bitrate * 1000 / 8 if bitrate > 0 else 0
         secured = written / bps if bps > 0 else 0.0
-        return {"gated": gated, "secured": secured, "target": seconds + BUFFER_AHEAD_SEC}
+        return {"gated": False, "secured": secured, "target": seconds}
 
-    def _wants_pause(self, rec: dict[str, Any]) -> bool:
-        """Pure pacing math with a hysteresis latch (caller holds no lock).
-
-        True = stop reading ffmpeg stdout (pipe backpressure pauses ffmpeg).
-        `continue_current` ON, unknown bitrate, or finished downloads never gate.
-        """
-        if rec.get("status") != "downloading":
-            return False
-        try:
-            import settings as _settings
-
-            if bool(_settings.get("continue_current")):
+    def _job_live(self, video_id: str, token: int) -> bool:
+        """True if this job generation is still current and uncancelled."""
+        with self._lock:
+            rec = self._downloads.get(video_id)
+            if rec is None or rec.get("cancel"):
                 return False
-        except Exception:  # noqa: BLE001 - settings unreadable: stay ungated
-            return False
-        bitrate = int(rec.get("bitrate") or 0)
-        if bitrate <= 0:
-            return False
-        bps = bitrate * 1000 / 8
-        secured = float(rec.get("written") or 0) / bps
-        target = float(rec.get("playhead") or 0.0) + BUFFER_AHEAD_SEC
-        if rec.get("paused"):
-            # Paused: top up to the FULL 10s margin, then hold shut.
-            # Ignores the 2s hysteresis slack on purpose (normal playback
-            # resumes at target-2s; pause must secure the full target).
-            return secured >= target
-        if rec.get("gated"):
-            # latched shut: stay shut until the buffer drains past hysteresis
-            return secured >= target - RESUME_HYSTERESIS_SEC
-        return secured >= target
+            return int(rec.get("gen") or 0) == token
 
     def get_buffer(self, video_id: str) -> Optional[io.BytesIO]:
         with self._lock:
@@ -367,16 +370,17 @@ class DownloadManager:
     def set_paused(self, video_id: str, paused: bool) -> dict[str, Any]:
         """Freeze/unfreeze a download in place (never abandons progress).
 
-        The pump loops notice within GATE_POLL_SEC and stall/resume ffmpeg
-        via pipe backpressure. Partial file, buffer, DB row, and process
-        are left untouched.
+        The pump loops notice within PAUSE_POLL_SEC and stop reading ffmpeg
+        stdout (pipe backpressure stalls ffmpeg) until resumed. Partial file,
+        buffer, DB row, and process are left untouched. Paused time never
+        trips the stall watchdog.
         """
         with self._lock:
             rec = self._downloads.get(video_id)
             if rec is None or rec.get("status") != "downloading":
                 return {"ok": False, "reason": "not-downloading"}
             rec["paused"] = bool(paused)
-            return {"ok": True, "paused": bool(paused), "gated": bool(rec.get("gated"))}
+            return {"ok": True, "paused": bool(paused), "gated": False}
 
     def pause_download(self, video_id: str) -> dict[str, Any]:
         return self.set_paused(video_id, True)
@@ -448,6 +452,94 @@ class DownloadManager:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False) or {}
 
+    def _resolve_guarded(self, video_id: str, token: int, url: str) -> dict[str, Any]:
+        """Run _resolve with a hard deadline so a hung extractor can't pin a lane.
+
+        The blocking yt-dlp call runs in a disposable daemon thread; if it
+        exceeds RESOLVE_TIMEOUT_SEC the lane is freed and the job fails. The
+        generation token ensures a late-returning resolve (or a resolve that
+        finished after cancel) can never spawn ffmpeg afterwards — the worker
+        re-checks liveness before Popen.
+        """
+        box: dict[str, Any] = {}
+        done = threading.Event()
+
+        def _target() -> None:
+            try:
+                box["info"] = self._resolve(url)
+            except Exception as exc:  # noqa: BLE001
+                box["error"] = exc
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_target, daemon=True,
+                             name=f"dl-resolve-{video_id}")
+        t.start()
+        if not done.wait(RESOLVE_TIMEOUT_SEC):
+            raise RuntimeError(
+                f"audio resolve timed out after {int(RESOLVE_TIMEOUT_SEC)}s")
+        if not self._job_live(video_id, token):
+            raise RuntimeError("download superseded before resolve completed")
+        if "error" in box:
+            raise box["error"]
+        return box.get("info") or {}
+
+    def _watch_stall(self, video_id: str, token: int,
+                     stop: threading.Event) -> None:
+        """Kill a stalled ffmpeg so the pump's blocking read unblocks.
+
+        Runs alongside the pump loop (which a monitor cannot replace: on
+        Windows, select() doesn't work on pipes). Watches `rec["written"]`:
+        zero bytes past FIRST_BYTE_GRACE_SEC, or no new bytes for
+        STALL_TIMEOUT_SEC afterwards, terminates ffmpeg and flags
+        `rec["stalled"]` for the pump to classify. Paused/cancelled time and
+        superseded generations never trip it. Daemon thread; exits on `stop`
+        or when the job leaves `downloading`.
+        """
+        start = time.monotonic()
+        last_new = start
+        last_written = 0
+        stalled = False
+        while not stop.wait(1.0):
+            with self._lock:
+                rec = self._downloads.get(video_id)
+                if rec is None or int(rec.get("gen") or 0) != token:
+                    return
+                if rec.get("cancel") or rec.get("status") != "downloading":
+                    return
+                paused = bool(rec.get("paused"))
+                written = int(rec.get("written") or 0)
+                proc = rec.get("proc")
+            if paused:
+                start = time.monotonic()
+                last_new = start
+                last_written = written
+                continue
+            if written != last_written:
+                last_written = written
+                last_new = time.monotonic()
+                continue
+            now = time.monotonic()
+            if written == 0:
+                if now - start > FIRST_BYTE_GRACE_SEC:
+                    stalled = True
+                    break
+            elif now - last_new > STALL_TIMEOUT_SEC:
+                stalled = True
+                break
+        if not stalled:
+            return  # stopped normally (job finished/cancelled/superseded)
+        with self._lock:
+            rec = self._downloads.get(video_id)
+            if rec is None or int(rec.get("gen") or 0) != token:
+                return
+            if rec.get("status") != "downloading" or rec.get("cancel"):
+                return
+            rec["stalled"] = True
+            proc = rec.get("proc")
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+
     def _build_cmd(
         self, direct: str, headers: dict[str, str], part_path: Path, bitrate: int
     ) -> list[str]:
@@ -481,6 +573,10 @@ class DownloadManager:
     def _build_cmd_memory(self, direct: str, headers: dict[str, str], bitrate: int) -> list[str]:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
         cmd += ["-fflags", "nobuffer"]
+        # Backstop for a dead CDN socket mid-read: abort network reads stuck
+        # longer than this (microseconds). The pump watchdog is the enforcer;
+        # this keeps ffmpeg itself from hanging forever underneath it.
+        cmd += ["-rw_timeout", str(10 * 1_000_000)]
         header_blob = "".join(f"{k}: {v}\r\n" for k, v in headers.items() if v)
         if header_blob:
             cmd += ["-headers", header_blob]
@@ -529,10 +625,10 @@ class DownloadManager:
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-    def _run_memory(self, video_id: str, title: str, url: str, bitrate: int) -> None:
+    def _run_memory(self, video_id: str, title: str, url: str, bitrate: int, token: int) -> None:
         proc: Optional[subprocess.Popen] = None
         try:
-            info = self._resolve(url)
+            info = self._resolve_guarded(video_id, token, url)
             direct = info.get("url") or ""
             headers = info.get("http_headers") or {}
             duration = int(info.get("duration") or 0)
@@ -545,6 +641,8 @@ class DownloadManager:
 
             if not direct:
                 raise RuntimeError("could not resolve a direct audio URL")
+            if not self._job_live(video_id, token):
+                return  # superseded/cancelled while resolving: never spawn ffmpeg
 
             cmd = self._build_cmd_memory(direct, headers, bitrate)
             proc = subprocess.Popen(
@@ -563,35 +661,64 @@ class DownloadManager:
             stream = proc.stdout
             if stream is None:
                 raise RuntimeError("ffmpeg stdout not available")
-            while True:
-                with self._lock:
-                    rec = self._downloads.get(video_id)
-                    if rec is None:
+            # Uncapped pump: read as fast as ffmpeg produces. A watchdog
+            # thread (_watch_stall) kills a stalled ffmpeg so the blocking
+            # read below unblocks; the pump then classifies the outcome.
+            # Pause freezes in place (backpressure stalls ffmpeg); paused
+            # time never trips the watchdog.
+            stop_watch = threading.Event()
+            watch = threading.Thread(
+                target=self._watch_stall, args=(video_id, token, stop_watch),
+                daemon=True, name=f"dl-watch-{video_id}",
+            )
+            watch.start()
+            stale = False
+            try:
+                while True:
+                    with self._lock:
+                        rec = self._downloads.get(video_id)
+                        if rec is None:
+                            break
+                        if int(rec.get("gen") or 0) != token:
+                            stale = True
+                            break
+                        if rec.get("cancel"):
+                            break
+                        paused = bool(rec.get("paused"))
+                    if paused:
+                        time.sleep(PAUSE_POLL_SEC)
+                        continue
+                    chunk = stream.read(65536)
+                    if not chunk:
                         break
-                    if rec.get("cancel"):
-                        break
-                    pause = self._wants_pause(rec)
-                    rec["gated"] = pause
-                if pause:
-                    # Gate shut: don't read -> ffmpeg blocks on the full pipe
-                    # buffer (backpressure) and stops consuming the network.
-                    time.sleep(GATE_POLL_SEC)
-                    continue
-                chunk = stream.read(65536)
-                if not chunk:
-                    break
-                buffer.write(chunk)
-                with self._lock:
-                    rec = self._downloads.get(video_id)
-                    if rec is not None:
-                        rec["written"] = buffer.tell()
+                    buffer.write(chunk)
+                    with self._lock:
+                        rec = self._downloads.get(video_id)
+                        if rec is not None:
+                            rec["written"] = buffer.tell()
+            finally:
+                stop_watch.set()
+            if stale:
+                return  # superseded by a newer generation: leave it alone
+
+            with self._lock:
+                rec = self._downloads.get(video_id)
+                stalled = bool(rec and rec.get("stalled"))
+            if stalled:
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(
+                    f"ffmpeg stalled: no new bytes for {int(STALL_TIMEOUT_SEC)}s")
 
             stderr = proc.communicate()[1]
             code = proc.returncode
 
             with self._lock:
                 rec = self._downloads.get(video_id)
-                cancelled = bool(rec and rec.get("cancel"))
+                cancelled = bool(rec and rec.get("cancel")
+                                 and int(rec.get("gen") or 0) == token)
             if cancelled:
                 with self._lock:
                     if video_id in self._downloads:
@@ -622,18 +749,26 @@ class DownloadManager:
             if self._on_finished:
                 self._on_finished(video_id, title, None)
         except Exception as exc:  # noqa: BLE001
+            # Only fail the CURRENT generation: a superseded worker (old
+            # token) must never poison the newer job's state.
+            current = False
             with self._lock:
-                if video_id in self._downloads:
-                    self._downloads[video_id]["status"] = "failed"
-                    self._downloads[video_id]["error"] = str(exc)[:300]
-            library_db.update_track(video_id, status="failed")
-            print(f"[downloader] {video_id} failed: {exc}")
+                rec = self._downloads.get(video_id)
+                if rec is not None and int(rec.get("gen") or 0) == token:
+                    rec["status"] = "failed"
+                    rec["error"] = str(exc)[:300]
+                    current = True
+            if current:
+                library_db.update_track(video_id, status="failed")
+                log.warning("%s failed: %s", video_id, exc)
+            else:
+                log.info("%s superseded: %s", video_id, exc)
         finally:
             if proc and proc.poll() is None:
                 proc.terminate()
             with self._lock:
                 rec = self._downloads.get(video_id)
-                if rec is not None:
+                if rec is not None and int(rec.get("gen") or 0) == token:
                     rec["proc"] = None
 
     def _run(
@@ -644,10 +779,11 @@ class DownloadManager:
         part_path: Path,
         final_path: Path,
         bitrate: int,
+        token: int,
     ) -> None:
         proc: Optional[subprocess.Popen] = None
         try:
-            info = self._resolve(url)
+            info = self._resolve_guarded(video_id, token, url)
             direct = info.get("url") or ""
             headers = info.get("http_headers") or {}
             duration = int(info.get("duration") or 0)
@@ -660,10 +796,13 @@ class DownloadManager:
 
             if not direct:
                 raise RuntimeError("could not resolve a direct audio URL")
+            if not self._job_live(video_id, token):
+                return  # superseded/cancelled while resolving: never spawn ffmpeg
             # Pumped mode: ffmpeg writes MP3 to stdout, Python writes the
-            # .part file. Closing the gate (not reading) lets pipe
-            # backpressure stall ffmpeg — a pause that works on Windows
-            # with stdlib only (no SIGSTOP, no psutil).
+            # .part file. Not reading (paused) lets pipe backpressure stall
+            # ffmpeg — a pause that works on Windows with stdlib only
+            # (no SIGSTOP, no psutil). No ahead-of-playhead cap: the pump
+            # reads as fast as ffmpeg produces until EOF.
             cmd = self._build_cmd_memory(direct, headers, bitrate)
             proc = subprocess.Popen(
                 cmd,
@@ -680,35 +819,64 @@ class DownloadManager:
             stream = proc.stdout
             if stream is None:
                 raise RuntimeError("ffmpeg stdout not available")
-            with open(part_path, "wb") as out:
-                while True:
-                    with self._lock:
-                        rec = self._downloads.get(video_id)
-                        if rec is None:
+            # Uncapped pump with stall watchdog (see _run_memory): the
+            # _watch_stall thread kills a stalled ffmpeg so this blocking
+            # read unblocks; the outcome is classified below.
+            stop_watch = threading.Event()
+            watch = threading.Thread(
+                target=self._watch_stall, args=(video_id, token, stop_watch),
+                daemon=True, name=f"dl-watch-{video_id}",
+            )
+            watch.start()
+            stale = False
+            try:
+                with open(part_path, "wb") as out:
+                    while True:
+                        with self._lock:
+                            rec = self._downloads.get(video_id)
+                            if rec is None:
+                                break
+                            if int(rec.get("gen") or 0) != token:
+                                stale = True
+                                break
+                            if rec.get("cancel"):
+                                break
+                            paused = bool(rec.get("paused"))
+                        if paused:
+                            time.sleep(PAUSE_POLL_SEC)
+                            continue
+                        chunk = stream.read(65536)
+                        if not chunk:
                             break
-                        if rec.get("cancel"):
-                            break
-                        pause = self._wants_pause(rec)
-                        rec["gated"] = pause
-                    if pause:
-                        time.sleep(GATE_POLL_SEC)
-                        continue
-                    chunk = stream.read(65536)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    out.flush()
-                    with self._lock:
-                        rec = self._downloads.get(video_id)
-                        if rec is not None:
-                            rec["written"] = int(rec.get("written") or 0) + len(chunk)
+                        out.write(chunk)
+                        out.flush()
+                        with self._lock:
+                            rec = self._downloads.get(video_id)
+                            if rec is not None:
+                                rec["written"] = int(rec.get("written") or 0) + len(chunk)
+            finally:
+                stop_watch.set()
+            if stale:
+                return  # superseded by a newer generation: leave it alone
+
+            with self._lock:
+                rec = self._downloads.get(video_id)
+                stalled = bool(rec and rec.get("stalled"))
+            if stalled:
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(
+                    f"ffmpeg stalled: no new bytes for {int(STALL_TIMEOUT_SEC)}s")
 
             stderr = proc.communicate()[1]
             code = proc.returncode
 
             with self._lock:
                 rec = self._downloads.get(video_id)
-                cancelled = bool(rec and rec.get("cancel"))
+                cancelled = bool(rec and rec.get("cancel")
+                                 and int(rec.get("gen") or 0) == token)
             if cancelled:
                 # File handle is closed (the `with open(...)` block exited),
                 # so delete the abandoned .part now; the startup sweep is
@@ -741,20 +909,28 @@ class DownloadManager:
             if self._on_finished:
                 self._on_finished(video_id, title, final_path)
         except Exception as exc:  # noqa: BLE001
+            # Only fail the CURRENT generation: a superseded worker (old
+            # token) must never poison the newer job's state.
+            current = False
             with self._lock:
-                if video_id in self._downloads:
-                    self._downloads[video_id]["status"] = "failed"
-                    self._downloads[video_id]["error"] = str(exc)[:300]
-            try:
-                part_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            library_db.update_track(video_id, status="failed")
-            print(f"[downloader] {video_id} failed: {exc}")
+                rec = self._downloads.get(video_id)
+                if rec is not None and int(rec.get("gen") or 0) == token:
+                    rec["status"] = "failed"
+                    rec["error"] = str(exc)[:300]
+                    current = True
+            if current:
+                try:
+                    part_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                library_db.update_track(video_id, status="failed")
+                log.warning("%s failed: %s", video_id, exc)
+            else:
+                log.info("%s superseded: %s", video_id, exc)
         finally:
             if proc and proc.poll() is None:
                 proc.terminate()
             with self._lock:
                 rec = self._downloads.get(video_id)
-                if rec is not None:
+                if rec is not None and int(rec.get("gen") or 0) == token:
                     rec["proc"] = None

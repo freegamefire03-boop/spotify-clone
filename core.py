@@ -10,6 +10,7 @@ picks its own random port. The GUI reaches Python through:
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import re
@@ -34,6 +35,33 @@ import settings
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 COOKIES_FILE = ROOT / "cookies.txt"
+LOG_FILE = ROOT / "spotify-clone.log"
+
+log = logging.getLogger("spotify.core")
+
+
+def setup_logging() -> None:
+    """Timestamped file + console logging (idempotent).
+
+    pythonw.exe has no console, so the log FILE is the only persistent
+    record of downloader failures — previously they went to print() and
+    vanished. Console runs still see everything via the stream handler.
+    """
+    root = logging.getLogger()
+    if getattr(root, "_spotify_setup", False):
+        return
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(threadName)s] %(levelname)s %(name)s: %(message)s")
+    try:
+        fh = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError:
+        pass
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    root._spotify_setup = True  # type: ignore[attr-defined]
 
 SEARCH_POOL = 50
 SEARCH_TTL = 600.0
@@ -66,9 +94,9 @@ _readers_lock = threading.Lock()
 
 def _on_download_finished(video_id: str, title: str, mp3_path: Optional[Path]) -> None:
     if mp3_path:
-        print(f"[library] saved {mp3_path.name}")
+        log.info("saved %s", mp3_path.name)
     else:
-        print(f"[library] {video_id} ready in memory")
+        log.info("%s ready in memory", video_id)
 
 
 def _worker_count() -> int:
@@ -159,7 +187,7 @@ def set_cookies_from_text(text: str, overwrite: bool = False) -> dict[str, Any]:
             pass
     except OSError as exc:
         return {"ok": False, "error": f"Could not write cookies.txt: {exc}"}
-    print(f"[cookies] installed ({COOKIES_FILE.stat().st_size} bytes)")
+    log.info("cookies installed (%d bytes)", COOKIES_FILE.stat().st_size)
     _invalidate_cookie_caches()
     return {"ok": True, **get_cookie_status()}
 
@@ -169,7 +197,7 @@ def remove_cookies() -> dict[str, Any]:
         COOKIES_FILE.unlink(missing_ok=True)
     except OSError as exc:
         return {"ok": False, "error": f"Could not remove cookies.txt: {exc}"}
-    print("[cookies] removed")
+    log.info("cookies removed")
     _invalidate_cookie_caches()
     return {"ok": True, **get_cookie_status()}
 
@@ -696,9 +724,44 @@ def _has_valid_mp3_prefix_bytes(head: bytes) -> bool:
     return _find_mp3_sync(head[:4]) != -1
 
 
+def _unavailable(start_response: Callable, video_id: str):
+    """Honest error for an unservable track (nothing decodable in time).
+
+    Must be used INSTEAD of a 200 with an empty body: Chromium reports an
+    empty audio/mpeg response as "no supported source", hiding the real
+    cause. A 503 lets the GUI's retry path surface "Stream unavailable".
+    """
+    body = b"audio unavailable: download stalled or failed, try again"
+    start_response("503 Service Unavailable", [
+        ("Content-Type", "text/plain"),
+        ("Content-Length", str(len(body))),
+        ("Cache-Control", "no-store"),
+    ])
+    return [body]
+
+
 def _serve_memory_partial(
     start_response: Callable, video_id: str, range_header: Optional[str]
 ):
+    # Wait for a valid prefix BEFORE start_response so an unservable track
+    # gets a 503 (see _unavailable) instead of an empty 200.
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if download_manager.buffer_size(video_id) >= MIN_VALID_MP3_PREFIX:
+            head = download_manager.buffer_head(video_id, MIN_VALID_MP3_PREFIX)
+            if _has_valid_mp3_prefix_bytes(head):
+                break
+        if not download_manager.is_active(video_id):
+            break
+        time.sleep(0.02)
+    else:
+        return _unavailable(start_response, video_id)
+
+    if not download_manager.is_active(video_id):
+        head = download_manager.buffer_head(video_id, MIN_VALID_MP3_PREFIX)
+        if not _has_valid_mp3_prefix_bytes(head):
+            return _unavailable(start_response, video_id)
+
     start_response("200 OK", [
         ("Content-Type", "audio/mpeg"),
         ("Cache-Control", "no-store"),
@@ -706,19 +769,7 @@ def _serve_memory_partial(
     ])
 
     def generate() -> Iterator[bytes]:
-        deadline = time.monotonic() + 30.0
         sent = 0
-
-        while time.monotonic() < deadline:
-            if download_manager.buffer_size(video_id) >= MIN_VALID_MP3_PREFIX:
-                head = download_manager.buffer_head(video_id, MIN_VALID_MP3_PREFIX)
-                if _has_valid_mp3_prefix_bytes(head):
-                    break
-            if not download_manager.is_active(video_id):
-                break
-            time.sleep(0.02)
-        else:
-            return
 
         last_size = -1
         idle_since = time.monotonic()
@@ -740,7 +791,8 @@ def _serve_memory_partial(
                 if size != last_size:
                     last_size = size
                     idle_since = time.monotonic()
-                elif download_manager.is_gated(video_id):
+                elif download_manager.is_paused(video_id):
+                    # Frozen by the user, not stalled: keep the stream open.
                     idle_since = time.monotonic()
                 elif time.monotonic() - idle_since > 30.0:
                     return
@@ -813,7 +865,8 @@ def _audio_response(start_response: Callable, video_id: str, range_header: Optio
     return _stream_from_youtube(start_response, video_id, range_header)
 
 
-def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]]) -> Optional[Path]:
+def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]],
+                        priority: int = downloader.FG_PRIORITY) -> Optional[Path]:
     """Return the partial file path, starting/resuming the download if needed."""
     if track is None:
         return None
@@ -825,7 +878,7 @@ def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]]) -> Optio
     memory = bool(settings.get("memory_mode"))
     return download_manager.start(
         video_id, title, url, bitrate, memory_mode=memory,
-        priority=downloader.FG_PRIORITY,
+        priority=priority,
     )
 
 
@@ -971,6 +1024,34 @@ def _serve_partial(
     bitrate = _current_bitrate()
     gate = _AdaptiveGate(bitrate)
 
+    # Wait for a valid MP3 prefix BEFORE start_response so an unservable
+    # track gets an honest 503 (see _unavailable) instead of a 200 with an
+    # empty body (which Chromium reports as "no supported source").
+    deadline = time.monotonic() + 30.0
+
+    # Wait for valid MP3 prefix (ID3v2 + frame sync), not arbitrary size
+    while time.monotonic() < deadline:
+        if _has_valid_mp3_prefix(part):
+            break
+        if not download_manager.is_active(video_id) and part.exists():
+            break
+        gate.tick(part)
+        time.sleep(0.02)
+    else:
+        return _unavailable(start_response, video_id)
+
+    if not _has_valid_mp3_prefix(part):
+        # Download died before producing a decodable prefix.
+        return _unavailable(start_response, video_id)
+
+    # Adaptive gate: wait for measured throughput to produce enough bytes
+    want = gate.want()
+    while part.exists() and part.stat().st_size < want:
+        if time.monotonic() > deadline or not download_manager.is_active(video_id):
+            break
+        gate.tick(part)
+        time.sleep(0.02)
+
     start_response("200 OK", [
         ("Content-Type", "audio/mpeg"),
         ("Cache-Control", "no-store"),
@@ -978,27 +1059,6 @@ def _serve_partial(
     ])
 
     def generate() -> Iterator[bytes]:
-        deadline = time.monotonic() + 30.0
-
-        # Wait for valid MP3 prefix (ID3v2 + frame sync), not arbitrary size
-        while time.monotonic() < deadline:
-            if _has_valid_mp3_prefix(part):
-                break
-            if not download_manager.is_active(video_id) and part.exists():
-                break
-            gate.tick(part)
-            time.sleep(0.02)
-        else:
-            return
-
-        # Adaptive gate: wait for measured throughput to produce enough bytes
-        want = gate.want()
-        while part.stat().st_size < want:
-            if time.monotonic() > deadline or not download_manager.is_active(video_id):
-                break
-            gate.tick(part)
-            time.sleep(0.02)
-
         # Handles are opened per read and closed immediately, so ffmpeg is never
         # blocked by us when it renames the finished file (Windows: WinError 32).
         # When that rename happens mid-stream we follow the file to its new name.
@@ -1032,14 +1092,13 @@ def _serve_partial(
                     yield block
                 elif download_manager.is_active(video_id):
                     # safety net: a download that died without reporting must not
-                    # keep this response open forever. A buffer-gated (paced)
-                    # download legitimately shows no growth while the user
-                    # listens to the secured 10s, so the watchdog is suspended
-                    # while gated.
+                    # keep this response open forever. A user-paused download
+                    # legitimately shows no growth, so the watchdog is
+                    # suspended while paused.
                     if size != last_size:
                         last_size = size
                         idle_since = time.monotonic()
-                    elif download_manager.is_gated(video_id):
+                    elif download_manager.is_paused(video_id):
                         idle_since = time.monotonic()
                     elif time.monotonic() - idle_since > 30.0:
                         return
@@ -1169,6 +1228,7 @@ class Api:
             "cookies": bool(cookies_path()),
             "cookies_path": str(COOKIES_FILE),
             "bitrate": _current_bitrate(),
+            "lanes": download_manager.lane_status(),
         }
 
     def prepare_track(self, video_id: str) -> dict[str, Any]:
@@ -1176,7 +1236,9 @@ class Api:
         return _prepare_track(video_id)
 
     def download_progress(self, video_id: str) -> dict[str, Any]:
-        return download_manager.get_progress(video_id)
+        progress = download_manager.get_progress(video_id)
+        progress["lanes"] = download_manager.lane_status()
+        return progress
 
     def report_playhead(self, video_id: str, seconds: float) -> dict[str, Any]:
         try:
@@ -1200,16 +1262,11 @@ class Api:
     def get_settings(self) -> dict[str, Any]:
         return {
             "memory_mode": bool(settings.get("memory_mode")),
-            "continue_current": bool(settings.get("continue_current")),
             "queue_depth": int(settings.get("queue_depth") or 0),
         }
 
     def set_memory_mode(self, value: bool) -> dict[str, Any]:
         settings.set("memory_mode", bool(value))
-        return {"ok": True}
-
-    def set_continue_current(self, value: bool) -> dict[str, Any]:
-        settings.set("continue_current", bool(value))
         return {"ok": True}
 
     def set_queue_depth(self, value: int) -> dict[str, Any]:
@@ -1322,14 +1379,11 @@ class Api:
     def _prefetch_upcoming(self, upcoming: Any, current_id: str) -> None:
         """Start background downloads for the next N queue items.
 
-        Only when continue_current (Option 1) is ON; queue_depth (Option 2)
-        says how many. Reuses DownloadManager.start() (dedupes active
-        downloads, skips disk cache hits, respects memory_mode). Never
-        touches playhead/paused flags — those belong to the current track.
+        Uncapped (wifi-first): depth comes from queue_depth alone (0 = off).
+        Reuses DownloadManager.start() (dedupes active downloads, skips disk
+        cache hits, respects memory_mode).
         """
         try:
-            if not bool(settings.get("continue_current")):
-                return
             depth = int(settings.get("queue_depth") or 0)
         except (TypeError, ValueError):
             return
@@ -1365,15 +1419,50 @@ class Api:
         except Exception:  # noqa: BLE001 - home must never break search/play
             return {"mode": "library", "items": [], "cookies": bool(cookies_path())}
 
+    def _reap_orphan_part(self, video_id: str) -> None:
+        """Delete a mid-session orphan .part (the startup sweep is startup-only).
+
+        Only when no download is in flight for the id and the DB row is
+        terminal (failed/cancelled): never touches a .part belonging to a
+        queued or running job.
+        """
+        try:
+            if download_manager.is_active(video_id):
+                return
+            track = library_db.get_track(video_id)
+            if not track or track.get("status") not in ("failed", "cancelled"):
+                return
+            file_path = track.get("file_path")
+            if not file_path:
+                return
+            candidate = Path(str(file_path) + ".part")
+            if candidate.is_file():
+                candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def play(
         self, video_id: str, title: str, url: str, upcoming: Any = None,
-        prev_id: Any = None,
+        prev_id: Any = None, priority: Any = None, prefetch_only: Any = False,
     ) -> dict[str, Any]:
-        """Register a track and start downloading it (called by the GUI on play)."""
+        """Register a track and start downloading it (called by the GUI on play).
+
+        Hover prefetch passes priority=BG + prefetch_only=True: the download
+        warms on a background lane without touching play history, the
+        playhead, or the paused flag — so a hover can never disturb (or queue
+        ahead of) real playback. Real clicks use the foreground lane.
+        """
         library_db.init_db()
         with _home_lock:
             _home_cache.pop("lib", None)
             _home_cache.pop("rec", None)
+        try:
+            lane = int(priority) if priority is not None else downloader.FG_PRIORITY
+        except (TypeError, ValueError):
+            lane = downloader.FG_PRIORITY
+        if lane != downloader.BG_PRIORITY:
+            lane = downloader.FG_PRIORITY
+        warming = bool(prefetch_only)
         # Skip path: cancel the previously-playing download so it stops
         # fetching and frees the foreground lane. Prefetch ids are never
         # cancelled (guarded below); completed files are left alone.
@@ -1390,21 +1479,29 @@ class Api:
                         download_manager.cancel(str(prev_id))
             except Exception:  # noqa: BLE001 - cancel must never break play
                 pass
+        self._reap_orphan_part(video_id)
+        if prev_id and prev_id != video_id:
+            try:
+                self._reap_orphan_part(str(prev_id))
+            except Exception:  # noqa: BLE001 - reaping must never break play
+                pass
         track = library_db.get_or_create_track(video_id, title, url, int(settings.get("bitrate") or 320))
-        try:
-            library_db.record_play(video_id)
-        except Exception:  # noqa: BLE001 - history must never break playback
-            pass
+        if not warming:
+            try:
+                library_db.record_play(video_id)
+            except Exception:  # noqa: BLE001 - history must never break playback
+                pass
         if track.get("status") == "mp3" and track.get("file_path"):
             existing = Path(track["file_path"])
             if existing.is_file() and existing.stat().st_size > 0:
                 return {"status": "mp3", "path": str(existing)}
-        _ensure_downloading(video_id, track)
-        # Fresh play from byte 0: drop any stale playhead / paused flag from a
-        # previous listen so the 10s-ahead gate doesn't start shut.
-        download_manager.report_playhead(video_id, 0.0)
-        download_manager.set_paused(video_id, False)
-        self._prefetch_upcoming(upcoming, current_id=video_id)
+        _ensure_downloading(video_id, track, priority=lane)
+        if not warming:
+            # Fresh play from byte 0: drop any stale paused flag from a
+            # previous listen. (Playhead no longer gates anything.)
+            download_manager.set_paused(video_id, False)
+        if not warming:
+            self._prefetch_upcoming(upcoming, current_id=video_id)
         return download_manager.get_progress(video_id)
 
     def resolve(self, video_id: str) -> dict[str, Any]:

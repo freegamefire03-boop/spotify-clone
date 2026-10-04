@@ -2,6 +2,79 @@
   "bitrate": 320,
   "library_dir": null,
   "memory_mode": false,
-  "continue_current": false,
-  "queue_depth": 0
+  "queue_depth": 3,
+  "download_workers": 3,
+  "session_queue": [
+    {
+      "id": "gfGSGjh77tw",
+      "title": "How I Tricked The Internet",
+      "channel": "MrBeast 2",
+      "duration": 583,
+      "thumbnail": "https://i.ytimg.com/vi/gfGSGjh77tw/mqdefault.jpg"
+    },
+    {
+      "id": "EaJZS9PjNOc",
+      "title": "MONS - Nia",
+      "channel": "MONS",
+      "duration": 201,
+      "thumbnail": "https://i.ytimg.com/vi/EaJZS9PjNOc/mqdefault.jpg"
+    },
+    {
+      "id": "nmRPuBDVM6s",
+      "title": "MONS - Niba",
+      "channel": "MONS",
+      "duration": 140,
+      "thumbnail": "https://i.ytimg.com/vi/nmRPuBDVM6s/mqdefault.jpg"
+    },
+    {
+      "id": "Mnqsgsd2cck",
+      "title": "MONS - Tayer ( B4 Album )",
+      "channel": "MONS",
+      "duration": 163,
+      "thumbnail": "https://i.ytimg.com/vi/Mnqsgsd2cck/mqdefault.jpg"
+    },
+    {
+      "id": "wJ4BBFXhJ4k",
+      "title": "MONS - Nfss lhala ( Official Music Video )",
+      "channel": "MONS",
+      "duration": 204,
+      "thumbnail": "https://i.ytimg.com/vi/wJ4BBFXhJ4k/mqdefault.jpg"
+    },
+    {
+      "id": "vWrJxTl297o",
+      "title": "Best 20 Social Media Incoming Calls Ringtone",
+      "channel": "Gadget Twice",
+      "duration": 99,
+      "thumbnail": "https://i.ytimg.com/vi/vWrJxTl297o/mqdefault.jpg"
+    },
+    {
+      "id": "Me8sqOJh11E",
+      "title": "Dog Barking - Ringtone Mp3",
+      "channel": "",
+      "duration": 0,
+      "thumbnail": "https://i.ytimg.com/vi/Me8sqOJh11E/mqdefault.jpg"
+    },
+    {
+      "id": "_zJA2r8fF4Y",
+      "title": "[REAL HOT SAUCE] Star Gold Theme Ringtone 2020 - 20 seconds (RBP / DDE Music Release)",
+      "channel": "",
+      "duration": 0,
+      "thumbnail": "https://i.ytimg.com/vi/_zJA2r8fF4Y/mqdefault.jpg"
+    },
+    {
+      "id": "gYcNRGc0clM",
+      "title": "New ringtone, hindi ringtone 2020,latest ringtone 2020,Ringtones for mobile mp3,New Ringtone 2020 ,",
+      "channel": "",
+      "duration": 0,
+      "thumbnail": "https://i.ytimg.com/vi/gYcNRGc0clM/mqdefault.jpg"
+    },
+    {
+      "id": "EqCxH8ZuEv4",
+      "title": "90s vijay love bgm \u2764\ufe0fShajakan movie#ringtone #vijay",
+      "channel": "",
+      "duration": 0,
+      "thumbnail": "https://i.ytimg.com/vi/EqCxH8ZuEv4/mqdefault.jpg"
+    }
+  ],
+  "session_qindex": 3
 }

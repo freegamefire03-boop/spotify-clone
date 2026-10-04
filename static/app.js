@@ -29,7 +29,6 @@ const settingsButton = document.getElementById("settingsButton");
 const settingsPanel = document.getElementById("settingsPanel");
 const closeSettings = document.getElementById("closeSettings");
 const memoryMode = document.getElementById("memoryMode");
-const continueCurrent = document.getElementById("continueCurrent");
 const queueDepth = document.getElementById("queueDepth");
 const libraryDir = document.getElementById("libraryDir");
 const changeFolder = document.getElementById("changeFolder");
@@ -74,13 +73,12 @@ function useBridge() {
   backend = {
     search: (q, offset, limit) => api.search(q, offset, limit),
     status: () => api.status(),
-    play: (id, title, url, upcoming, prevId) => api.play(id, title, url, upcoming ?? null, prevId ?? null),
+    play: (id, title, url, upcoming, prevId, priority, prefetchOnly) => api.play(id, title, url, upcoming ?? null, prevId ?? null, priority ?? 0, prefetchOnly ?? false),
     prepareTrack: (id) => api.prepare_track(id),
     setBitrate: (val) => api.set_bitrate(val),
     downloadProgress: (id) => api.download_progress(id),
     getSettings: () => api.get_settings(),
     setMemoryMode: (val) => api.set_memory_mode(val),
-    setContinueCurrent: (val) => api.set_continue_current(val),
     setQueueDepth: (val) => api.set_queue_depth(val),
     reportPlayhead: (id, s) => api.report_playhead(id, s),
     pauseDownload: (id) => api.pause_download(id),
@@ -176,9 +174,7 @@ function openSettings() {
   settingsPanel.hidden = false;
   backend.getSettings().then((s) => {
     memoryMode.checked = !!s.memory_mode;
-    continueCurrent.checked = !!s.continue_current;
-    queueDepth.value = Number(s.queue_depth) || 0;
-    queueDepth.disabled = !continueCurrent.checked;
+    queueDepth.value = Number(s.queue_depth ?? 3) || 0;
   }).catch(() => {});
   backend.getLibraryDir().then((d) => {
     if (d && d.path) libraryDir.value = d.path;
@@ -610,7 +606,9 @@ resultsList.addEventListener("mouseover", (event) => {
   if (!track || !backend) return;
   if (hoverTimer) clearTimeout(hoverTimer);
   hoverTimer = setTimeout(() => {
-    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`).catch(() => {});
+    // Hover warmup: background lane (priority 1), prefetch-only (no play
+    // history, no playhead/paused disturbance). Never queues ahead of clicks.
+    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, null, null, 1, true).catch(() => {});
   }, 150);
 });
 
@@ -751,13 +749,8 @@ memoryMode.addEventListener("change", () => {
   backend.setMemoryMode(memoryMode.checked);
 });
 
-continueCurrent.addEventListener("change", () => {
-  backend.setContinueCurrent(continueCurrent.checked);
-  queueDepth.disabled = !continueCurrent.checked;
-});
-
 queueDepth.addEventListener("change", () => {
-  const val = Math.max(1, Math.floor(Number(queueDepth.value) || 1));
+  const val = Math.max(0, Math.min(10, Math.floor(Number(queueDepth.value) || 0)));
   queueDepth.value = val;
   backend.setQueueDepth(val);
 });

@@ -341,3 +341,17 @@ body.nav-push .content, body.nav-push .player { margin-left: var(--sidenav-w); }
 .setting-folder input[type="text"]:focus { border-color: #1db954; outline: none; }
 .setting-error { font-size: 12px; color: #e0a100; padding: 4px 0; }
 .setting-error[hidden] { display: none; }
+#cookieText {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  background: #242424;
+  color: #fff;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: Consolas, monospace;
+  padding: 6px;
+}
+#cookieText:focus { border-color: #1db954; outline: none; }
+#cookieDetail.muted { color: #8a8a8a; font-size: 12px; }

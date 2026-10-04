@@ -98,6 +98,82 @@ def cookies_path() -> Optional[str]:
     return None
 
 
+def validate_cookies_text(text: str) -> tuple[bool, str]:
+    """Check pasted text looks like a Netscape cookies.txt (never logs it)."""
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    if len(raw) > 1_000_000:
+        return False, "Pasted content is too large (max 1 MB)."
+    lines = [ln for ln in raw.split("\n") if ln.strip()]
+    if not lines:
+        return False, "Paste cookies.txt content first."
+    head = lines[:5]
+    if any("# HTTP Cookie File" in ln for ln in head):
+        return True, ""
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        parts = ln.split("\t")
+        if len(parts) == 7 and parts[0] and parts[1] in ("TRUE", "FALSE") \
+                and parts[3] in ("TRUE", "FALSE") and parts[4].isdigit():
+            return True, ""
+    return False, ("Not a Netscape cookies.txt: need the '# HTTP Cookie File' "
+                   "header or tab-separated domain-flag-path-secure-expiry-name-value lines.")
+
+
+def get_cookie_status() -> dict[str, Any]:
+    """Presence + metadata only — never the contents."""
+    try:
+        if cookies_path():
+            st = COOKIES_FILE.stat()
+            return {"present": True, "path": str(COOKIES_FILE),
+                    "size": st.st_size, "mtime": st.st_mtime}
+    except OSError:
+        pass
+    return {"present": False, "path": str(COOKIES_FILE), "size": 0, "mtime": None}
+
+
+def _invalidate_cookie_caches() -> None:
+    with _home_lock:
+        _home_cache.pop("rec", None)
+        _home_cache.pop("lib", None)
+    with _search_lock:
+        _search_cache.clear()
+
+
+def set_cookies_from_text(text: str, overwrite: bool = False) -> dict[str, Any]:
+    ok, err = validate_cookies_text(text)
+    if not ok:
+        return {"ok": False, "error": err}
+    try:
+        if COOKIES_FILE.is_file() and COOKIES_FILE.stat().st_size > 0 and not overwrite:
+            return {"ok": False, "need_confirm": True,
+                    "error": "cookies.txt already exists. Confirm overwrite."}
+    except OSError:
+        pass
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    try:
+        COOKIES_FILE.write_text(raw if raw.endswith("\n") else raw + "\n", encoding="utf-8")
+        try:
+            os.chmod(COOKIES_FILE, 0o600)  # best-effort; no-op on Windows ACLs
+        except OSError:
+            pass
+    except OSError as exc:
+        return {"ok": False, "error": f"Could not write cookies.txt: {exc}"}
+    print(f"[cookies] installed ({COOKIES_FILE.stat().st_size} bytes)")
+    _invalidate_cookie_caches()
+    return {"ok": True, **get_cookie_status()}
+
+
+def remove_cookies() -> dict[str, Any]:
+    try:
+        COOKIES_FILE.unlink(missing_ok=True)
+    except OSError as exc:
+        return {"ok": False, "error": f"Could not remove cookies.txt: {exc}"}
+    print("[cookies] removed")
+    _invalidate_cookie_caches()
+    return {"ok": True, **get_cookie_status()}
+
+
 def base_opts(**extra: Any) -> dict[str, Any]:
     opts: dict[str, Any] = {
         "quiet": True,
@@ -1178,6 +1254,15 @@ class Api:
         settings.set("session_queue", clean)
         settings.set("session_qindex", qi)
         return {"ok": True}
+
+    def get_cookie_status(self) -> dict[str, Any]:
+        return get_cookie_status()
+
+    def set_cookies_from_text(self, text: str, overwrite: Any = False) -> dict[str, Any]:
+        return set_cookies_from_text(text, bool(overwrite))
+
+    def remove_cookies(self) -> dict[str, Any]:
+        return remove_cookies()
 
     def get_library_dir(self) -> dict[str, Any]:
         return {"ok": True, "path": str(library.get_library_dir())}

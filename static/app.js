@@ -34,6 +34,11 @@ const queueDepth = document.getElementById("queueDepth");
 const libraryDir = document.getElementById("libraryDir");
 const changeFolder = document.getElementById("changeFolder");
 const folderError = document.getElementById("folderError");
+const cookieDetail = document.getElementById("cookieDetail");
+const cookieText = document.getElementById("cookieText");
+const saveCookies = document.getElementById("saveCookies");
+const removeCookies = document.getElementById("removeCookies");
+const cookieError = document.getElementById("cookieError");
 const menuButton = document.getElementById("menuButton");
 const sidenav = document.getElementById("sidenav");
 const edgeZone = document.getElementById("edgeZone");
@@ -85,6 +90,9 @@ function useBridge() {
     getHome: () => api.get_home(),
     getSession: () => api.get_session(),
     saveSession: (queue, qIndex) => api.save_session(queue, qIndex),
+    getCookieStatus: () => api.get_cookie_status(),
+    setCookiesFromText: (t, ow) => api.set_cookies_from_text(t, ow),
+    removeCookies: () => api.remove_cookies(),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -175,6 +183,17 @@ function openSettings() {
   backend.getLibraryDir().then((d) => {
     if (d && d.path) libraryDir.value = d.path;
   }).catch(() => {});
+  cookieError.hidden = true;
+  cookieText.value = "";
+  backend.getCookieStatus().then((c) => {
+    if (c && c.present) {
+      const kb = (Number(c.size) / 1024).toFixed(1);
+      const when = c.mtime ? new Date(c.mtime * 1000).toLocaleDateString() : "";
+      cookieDetail.textContent = `present · ${kb} KB${when ? " · " + when : ""}`;
+    } else {
+      cookieDetail.textContent = "missing";
+    }
+  }).catch(() => { cookieDetail.textContent = "missing"; });
 }
 
 function closeSettingsPanel() {
@@ -665,6 +684,55 @@ clearQueue.addEventListener("click", () => {
   renderQueue();
   updateRowStates();
   scheduleSaveSession();
+});
+
+function refreshHomeAfterCookieChange() {
+  refreshStatus();
+  state.home = [];
+  state.homeSections = [];
+  loadHome();
+}
+
+saveCookies.addEventListener("click", async () => {
+  const text = cookieText.value;
+  if (!text.trim()) {
+    cookieError.textContent = "Paste cookies.txt content first.";
+    cookieError.hidden = false;
+    return;
+  }
+  cookieError.hidden = true;
+  try {
+    let res = await backend.setCookiesFromText(text, false);
+    if (!res.ok && res.need_confirm) {
+      if (!confirm("cookies.txt exists. Overwrite?")) return;
+      res = await backend.setCookiesFromText(text, true);
+    }
+    if (!res.ok) {
+      cookieError.textContent = res.error || "Could not save cookies.";
+      cookieError.hidden = false;
+      return;
+    }
+    cookieText.value = "";
+    openSettings();
+    refreshHomeAfterCookieChange();
+  } catch (_) {
+    cookieError.textContent = "Could not save cookies.";
+    cookieError.hidden = false;
+  }
+});
+
+removeCookies.addEventListener("click", async () => {
+  if (!confirm("Remove cookies.txt? Recommendations turn off.")) return;
+  cookieError.hidden = true;
+  try {
+    await backend.removeCookies();
+    cookieText.value = "";
+    openSettings();
+    refreshHomeAfterCookieChange();
+  } catch (_) {
+    cookieError.textContent = "Could not remove cookies.";
+    cookieError.hidden = false;
+  }
 });
 
 window.addEventListener("pagehide", () => {

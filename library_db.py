@@ -142,13 +142,29 @@ def set_status(
     update_track(video_id, **fields)
 
 
-def reconcile_stale_downloads() -> dict[str, int]:
-    """Mark stale 'downloading' rows as 'failed' on startup.
+def _try_unlink(p: Path) -> bool:
+    """Delete one file; return True on success, False on any failure."""
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        return False
 
-    Returns counts of {repaired: N, failed: M}.
+
+def reconcile_stale_downloads() -> dict[str, int]:
+    """Reconcile unfinished work from previous sessions on startup.
+
+    - Stale 'downloading' rows are repaired (complete file on disk) or failed.
+    - Leftover `.part` files are deleted: nothing resumes today, so at
+      startup no `.part` belongs to a live download. Completed `.mp3` files
+      and non-`.part` files are never touched.
+    - Memory-only rows are dropped (their buffers died with the process).
+
+    Returns counts of {repaired: N, failed: M, parts_deleted: K}.
     """
     repaired = 0
     failed = 0
+    parts_deleted = 0
     with _connect() as conn:
         rows = conn.execute(
             "SELECT video_id, file_path FROM tracks WHERE status = 'downloading'"
@@ -170,9 +186,47 @@ def reconcile_stale_downloads() -> dict[str, int]:
                 (video_id,),
             )
             failed += 1
+        # DB-driven pass: .part files of rows that will never resume
+        # (downloading rows failed above, plus Cancelled/failed leftovers —
+        # cancel() abandons the .part without deleting it).
+        stale = conn.execute(
+            "SELECT file_path FROM tracks WHERE status IN ('downloading', 'cancelled', 'failed')"
+        ).fetchall()
+        for row in stale:
+            file_path = row["file_path"]
+            if not file_path:
+                continue
+            candidate = Path(str(file_path) + ".part")
+            try:
+                if candidate.is_file() and _try_unlink(candidate):
+                    parts_deleted += 1
+            except OSError:
+                pass
         conn.execute("DELETE FROM tracks WHERE status = 'memory'")
         conn.commit()
-    return {"repaired": repaired, "failed": failed}
+    # Folder sweep: orphans with no DB row (row deleted, collision rename,
+    # or a failed delete inside the downloader). Only *.part matches, so
+    # completed .mp3 files and anything else survive by construction.
+    # NOTE: raw `python main.py` twice bypasses start.bat's single-instance
+    # guard; the sweep could then delete a sibling's growing .part (it would
+    # just re-download). Accepted: .mp3 files are never touched.
+    try:
+        from library import get_library_dir
+
+        lib = get_library_dir()
+    except OSError:
+        lib = None
+    if lib is not None:
+        try:
+            for p in lib.glob("*.part"):
+                try:
+                    if p.is_file() and _try_unlink(p):
+                        parts_deleted += 1
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    return {"repaired": repaired, "failed": failed, "parts_deleted": parts_deleted}
 
 
 def delete_track(video_id: str) -> None:

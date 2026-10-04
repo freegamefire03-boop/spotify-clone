@@ -38,8 +38,9 @@ def main() -> int:
     try:
         # Create the library table before any request or bridge call can touch it.
         library_db.init_db()
-        # Reconcile stale 'downloading' rows from previous sessions
-        library_db.reconcile_stale_downloads()
+        # Reconcile stale downloads + orphaned .part files from previous sessions
+        stats = library_db.reconcile_stale_downloads()
+        print(f"[startup] reconcile {stats}")
 
         # The WSGI app goes in as the `url` argument: pywebview detects a
         # callable, runs it in a daemon thread in THIS process on a random

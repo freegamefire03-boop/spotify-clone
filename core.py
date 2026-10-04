@@ -270,8 +270,27 @@ def _library_home_items(limit: int = HOME_LIMIT) -> list[dict[str, Any]]:
     return out
 
 
+def _recent_home_items(limit: int = 10) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for t in library_db.list_recently_played(limit):
+        vid = t.get("video_id") or ""
+        out.append({
+            "id": vid,
+            "title": t.get("title") or "Unknown title",
+            "channel": "",
+            "duration": int(t.get("duration") or 0),
+            "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
+            "play_count": int(t.get("play_count") or 0),
+        })
+    return out
+
+
 def get_home() -> dict[str, Any]:
-    """Home feed: YouTube recommendations with cookies, else local library."""
+    """Home feed: YouTube recommendations with cookies, else local library.
+
+    Returns sections (Recently played + main feed) plus a flat items list
+    for backward compatibility.
+    """
     has_cookies = bool(cookies_path())
     now = time.time()
     if has_cookies:
@@ -290,7 +309,16 @@ def get_home() -> dict[str, Any]:
             except Exception:  # noqa: BLE001
                 items = []
         if items:
-            res = {"mode": "recommendations", "items": items[:HOME_LIMIT], "cookies": True}
+            items = items[:HOME_LIMIT]
+            recent = _recent_home_items()
+            seen = {i["id"] for i in recent}
+            sections = []
+            if recent:
+                sections.append({"title": "Recently played", "items": recent})
+            sections.append({"title": "Recommended for you",
+                             "items": [i for i in items if i["id"] not in seen]})
+            res = {"mode": "recommendations", "items": items,
+                   "sections": sections, "cookies": True}
             with _home_lock:
                 _home_cache["rec"] = (time.time(), res)
             return res
@@ -300,7 +328,16 @@ def get_home() -> dict[str, Any]:
             if cached and now - cached[0] < HOME_TTL:
                 return cached[1]
     items = _library_home_items()
-    res = {"mode": "library", "items": items, "cookies": has_cookies}
+    recent = _recent_home_items()
+    seen = {i["id"] for i in recent}
+    lib_rest = [i for i in items if i["id"] not in seen]
+    sections = []
+    if recent:
+        sections.append({"title": "Recently played", "items": recent})
+    sections.append({"title": "Recently played & offline", "items": lib_rest})
+    flat = recent + lib_rest
+    res = {"mode": "library", "items": flat or items,
+           "sections": sections, "cookies": has_cookies}
     if not has_cookies:
         with _home_lock:
             _home_cache["lib"] = (time.time(), res)
@@ -1213,6 +1250,7 @@ class Api:
         library_db.init_db()
         with _home_lock:
             _home_cache.pop("lib", None)
+            _home_cache.pop("rec", None)
         # Skip path: cancel the previously-playing download so it stops
         # fetching and frees the foreground lane. Prefetch ids are never
         # cancelled (guarded below); completed files are left alone.
@@ -1230,6 +1268,10 @@ class Api:
             except Exception:  # noqa: BLE001 - cancel must never break play
                 pass
         track = library_db.get_or_create_track(video_id, title, url, int(settings.get("bitrate") or 320))
+        try:
+            library_db.record_play(video_id)
+        except Exception:  # noqa: BLE001 - history must never break playback
+            pass
         if track.get("status") == "mp3" and track.get("file_path"):
             existing = Path(track["file_path"])
             if existing.is_file() and existing.stat().st_size > 0:

@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS tracks (
     duration        INTEGER,
     file_size       INTEGER,
     completed_at    TEXT,
-    created_at      TEXT
+    created_at      TEXT,
+    play_count      INTEGER NOT NULL DEFAULT 0,
+    last_played_at  TEXT
 )
 """
 
@@ -42,6 +44,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tracks ADD COLUMN file_size INTEGER")
     if "completed_at" not in existing:
         conn.execute("ALTER TABLE tracks ADD COLUMN completed_at TEXT")
+    if "play_count" not in existing:
+        conn.execute("ALTER TABLE tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0")
+    if "last_played_at" not in existing:
+        conn.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT")
     conn.commit()
 
 
@@ -102,6 +108,27 @@ def get_or_create_track(
         row = conn.execute("SELECT * FROM tracks WHERE video_id = ?", (video_id,)).fetchone()
         conn.commit()
         return dict(row) if row else {}
+
+
+def record_play(video_id: str) -> None:
+    """Bump play_count + last_played_at. Assumes the row exists."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE tracks SET play_count = COALESCE(play_count, 0) + 1, "
+            "last_played_at = ? WHERE video_id = ?",
+            (_now(), video_id),
+        )
+        conn.commit()
+
+
+def list_recently_played(limit: int = 10) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tracks WHERE last_played_at IS NOT NULL "
+            "ORDER BY last_played_at DESC, COALESCE(play_count, 0) DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_track(video_id: str) -> Optional[dict[str, Any]]:

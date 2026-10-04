@@ -219,10 +219,14 @@ function updateRowStates() {
 
 function renderResults() {
   if (state.mode === "home") {
-    resultsList.innerHTML = state.results.map(rowMarkup).join("");
+    const sections = state.homeSections && state.homeSections.length
+      ? state.homeSections
+      : [{ title: "", items: state.results }];
+    resultsList.innerHTML = sections.map((s) =>
+      (s.title ? `<h2 class="home-section-title">${escapeHtml(s.title)}</h2>` : "") +
+      s.items.map(rowMarkup).join("")).join("");
     emptyState.hidden = state.results.length > 0;
-    homeTitle.hidden = state.results.length === 0;
-    homeTitle.textContent = state.homeMode === "recommendations" ? "Recommended for you" : "Recently played & offline";
+    homeTitle.hidden = true;
     moreButton.hidden = true;
     updateRowStates();
     return;
@@ -254,6 +258,7 @@ async function loadHome() {
     const data = await backend.getHome();
     state.homeMode = data.mode;
     state.home = data.items || [];
+    state.homeSections = data.sections || [{ title: "", items: state.home }];
     state.results = state.home;
     if (!state.home.length) {
       emptyState.hidden = false;
@@ -261,6 +266,7 @@ async function loadHome() {
     }
   } catch (_) {
     state.home = [];
+    state.homeSections = [];
     state.results = [];
     emptyState.hidden = false;
     emptyState.querySelector("p").textContent = "Search for anything to start listening.";

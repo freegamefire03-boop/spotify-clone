@@ -83,12 +83,16 @@ function useBridge() {
     getLibraryDir: () => api.get_library_dir(),
     setLibraryDir: (p, copy) => api.set_library_dir(p, copy),
     getHome: () => api.get_home(),
+    getSession: () => api.get_session(),
+    saveSession: (queue, qIndex) => api.save_session(queue, qIndex),
   };
   state.ready = true;
   document.body.classList.add("native");
   refreshStatus();
-  if (searchInput.value.trim()) runSearch(searchInput.value, false);
-  else loadHome();
+  restoreSession().finally(() => {
+    if (searchInput.value.trim()) runSearch(searchInput.value, false);
+    else loadHome();
+  });
   return true;
 }
 
@@ -358,6 +362,7 @@ async function playTrack(track) {
   const idx = state.queue.findIndex((t) => t.id === track.id);
   if (idx === -1) state.queue.splice(Math.max(state.qIndex + 1, 0), 0, track);
   state.qIndex = state.queue.findIndex((t) => t.id === track.id);
+  scheduleSaveSession();
 
   updateNowPlaying();
   renderQueue();
@@ -497,6 +502,43 @@ function addToQueue(track) {
   state.queue.push(track);
   renderQueue();
   updateRowStates();
+  scheduleSaveSession();
+}
+
+let sessionSaveTimer = null;
+function sanitizeQueueForSave() {
+  return state.queue.slice(0, 100).map((t) => ({
+    id: t.id,
+    title: t.title,
+    channel: t.channel || "",
+    duration: Number(t.duration) || 0,
+    thumbnail: t.thumbnail || "",
+  })).filter((t) => t.id);
+}
+function scheduleSaveSession() {
+  if (!backend || !backend.saveSession) return;
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    backend.saveSession(sanitizeQueueForSave(), state.qIndex).catch(() => {});
+  }, 500);
+}
+
+async function restoreSession() {
+  if (!backend || !backend.getSession) return;
+  try {
+    const s = await backend.getSession();
+    if (!s || !Array.isArray(s.queue) || !s.queue.length) return;
+    state.queue = s.queue;
+    const qi = Number(s.qIndex);
+    state.qIndex = Number.isInteger(qi) && qi >= 0 && qi < state.queue.length ? qi : -1;
+    state.current = state.qIndex >= 0 ? state.queue[state.qIndex] : null;
+    audio.removeAttribute("src");
+    audio.load();
+    updateNowPlaying();
+    renderQueue();
+    updateRowStates();
+    updateTransportState();
+  } catch (_) {}
 }
 
 function playNext() {
@@ -522,6 +564,7 @@ function playPrev() {
 
 function togglePlayback() {
   if (!state.current) return;
+  if (!audio.getAttribute("src")) return playTrack(state.current);
   if (audio.paused) audio.play().catch(() => {});
   else audio.pause();
 }
@@ -561,6 +604,7 @@ queueList.addEventListener("click", (event) => {
     if (state.qIndex >= index) state.qIndex -= 1;
     renderQueue();
     updateRowStates();
+    scheduleSaveSession();
     return;
   }
   const item = event.target.closest(".queue-item");
@@ -620,6 +664,16 @@ clearQueue.addEventListener("click", () => {
   state.qIndex = -1;
   renderQueue();
   updateRowStates();
+  scheduleSaveSession();
+});
+
+window.addEventListener("pagehide", () => {
+  if (sessionSaveTimer) {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+    if (backend && backend.saveSession)
+      backend.saveSession(sanitizeQueueForSave(), state.qIndex).catch(() => {});
+  }
 });
 
 settingsButton.addEventListener("click", openSettings);

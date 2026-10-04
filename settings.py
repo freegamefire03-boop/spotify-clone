@@ -16,6 +16,8 @@ DEFAULTS: dict[str, Any] = {
     "continue_current": False,  # option 1: uncapped current-track download
     "queue_depth": 0,        # option 0: how many queue items to secure (0 = off)
     "download_workers": 3,   # total encode lanes: 1 foreground + rest background
+    "session_queue": [],     # last session's queue items (id/title/channel/duration/thumbnail)
+    "session_qindex": -1,    # index of current track in session_queue
 }
 
 

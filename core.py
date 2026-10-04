@@ -1141,6 +1141,44 @@ class Api:
         settings.set("queue_depth", depth)
         return {"ok": True, "queue_depth": depth}
 
+    def get_session(self) -> dict[str, Any]:
+        try:
+            raw = settings.get("session_queue") or []
+            qi = int(settings.get("session_qindex") if settings.get("session_qindex") is not None else -1)
+        except (TypeError, ValueError):
+            raw, qi = [], -1
+        clean = [t for t in raw if isinstance(t, dict)
+                 and isinstance(t.get("id"), str) and t["id"]][:100]
+        if not clean:
+            qi = -1
+        elif not 0 <= qi < len(clean):
+            qi = 0
+        return {"queue": clean, "qIndex": qi}
+
+    def save_session(self, queue: Any, q_index: Any) -> dict[str, Any]:
+        clean: list[dict[str, Any]] = []
+        for t in (queue or [])[:100]:
+            if not isinstance(t, dict) or not t.get("id"):
+                continue
+            clean.append({
+                "id": str(t["id"])[:32],
+                "title": str(t.get("title") or "Unknown")[:300],
+                "channel": str(t.get("channel") or "")[:200],
+                "duration": int(t.get("duration") or 0),
+                "thumbnail": str(t.get("thumbnail") or "")[:500],
+            })
+        try:
+            qi = int(q_index)
+        except (TypeError, ValueError):
+            qi = -1
+        if not clean:
+            qi = -1
+        elif not 0 <= qi < len(clean):
+            qi = 0
+        settings.set("session_queue", clean)
+        settings.set("session_qindex", qi)
+        return {"ok": True}
+
     def get_library_dir(self) -> dict[str, Any]:
         return {"ok": True, "path": str(library.get_library_dir())}
 

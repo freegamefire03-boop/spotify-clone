@@ -38,6 +38,10 @@ COOKIES_FILE = ROOT / "cookies.txt"
 SEARCH_POOL = 50
 SEARCH_TTL = 600.0
 STREAM_TTL = 240.0
+HOME_LIMIT = 20
+HOME_TTL = 600.0
+_home_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_home_lock = threading.Lock()
 CHUNK = 65536
 # Minimum bytes for a valid MP3 prefix (ID3v2 header + first frame sync).
 # Chromium's demuxer needs a complete frame to lock onto the format.
@@ -236,6 +240,71 @@ def _fetch_search(query: str) -> list[dict[str, Any]]:
             continue
         items.append(_normalize(entry))
     return items
+
+
+def _fetch_tab_items(url_or_key: str, limit: int = HOME_LIMIT) -> list[dict[str, Any]]:
+    opts = base_opts(extract_flat="in_playlist", skip_download=True, ignoreerrors=False, retries=2, socket_timeout=30)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url_or_key, download=False)
+    items: list[dict[str, Any]] = []
+    for entry in (info or {}).get("entries") or []:
+        if not entry or not entry.get("id"):
+            continue
+        items.append(_normalize(entry))
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _library_home_items(limit: int = HOME_LIMIT) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for t in library_db.list_home_library(limit):
+        vid = t.get("video_id") or ""
+        out.append({
+            "id": vid,
+            "title": t.get("title") or "Unknown title",
+            "channel": "",
+            "duration": int(t.get("duration") or 0),
+            "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
+        })
+    return out
+
+
+def get_home() -> dict[str, Any]:
+    """Home feed: YouTube recommendations with cookies, else local library."""
+    has_cookies = bool(cookies_path())
+    now = time.time()
+    if has_cookies:
+        with _home_lock:
+            cached = _home_cache.get("rec")
+            if cached and now - cached[0] < HOME_TTL:
+                return cached[1]
+        items: list[dict[str, Any]] = []
+        try:
+            items = _fetch_tab_items(":ytrecommended")
+        except Exception:  # noqa: BLE001
+            items = []
+        if not items:
+            try:
+                items = _fetch_tab_items("https://www.youtube.com/feed/trending")
+            except Exception:  # noqa: BLE001
+                items = []
+        if items:
+            res = {"mode": "recommendations", "items": items[:HOME_LIMIT], "cookies": True}
+            with _home_lock:
+                _home_cache["rec"] = (time.time(), res)
+            return res
+    else:
+        with _home_lock:
+            cached = _home_cache.get("lib")
+            if cached and now - cached[0] < HOME_TTL:
+                return cached[1]
+    items = _library_home_items()
+    res = {"mode": "library", "items": items, "cookies": has_cookies}
+    if not has_cookies:
+        with _home_lock:
+            _home_cache["lib"] = (time.time(), res)
+    return res
 
 
 def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
@@ -1130,12 +1199,20 @@ class Api:
         download_manager.cancel(video_id)
         return {"ok": True}
 
+    def get_home(self) -> dict[str, Any]:
+        try:
+            return get_home()
+        except Exception:  # noqa: BLE001 - home must never break search/play
+            return {"mode": "library", "items": [], "cookies": bool(cookies_path())}
+
     def play(
         self, video_id: str, title: str, url: str, upcoming: Any = None,
         prev_id: Any = None,
     ) -> dict[str, Any]:
         """Register a track and start downloading it (called by the GUI on play)."""
         library_db.init_db()
+        with _home_lock:
+            _home_cache.pop("lib", None)
         # Skip path: cancel the previously-playing download so it stops
         # fetching and frees the foreground lane. Prefetch ids are never
         # cancelled (guarded below); completed files are left alone.

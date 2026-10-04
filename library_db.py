@@ -241,6 +241,30 @@ def list_tracks() -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+def list_home_library(limit: int = 20) -> list[dict[str, Any]]:
+    """Recently-played completions first, then most-recent rows, deduped."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tracks WHERE status = 'mp3' "
+            "ORDER BY COALESCE(completed_at, created_at) DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        ids = {r["video_id"] for r in rows}
+        if len(rows) < limit:
+            extra = conn.execute(
+                "SELECT * FROM tracks ORDER BY COALESCE(completed_at, created_at) DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            rows = list(rows)
+            for r in extra:
+                if r["video_id"] not in ids:
+                    rows.append(r)
+                    ids.add(r["video_id"])
+                if len(rows) >= limit:
+                    break
+        return [dict(r) for r in rows[:limit]]
+
+
 def count_by_status(status: str) -> int:
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) FROM tracks WHERE status = ?", (status,)).fetchone()

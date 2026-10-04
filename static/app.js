@@ -23,6 +23,7 @@ const queueList = document.getElementById("queueList");
 const queueCount = document.getElementById("queueCount");
 const clearQueue = document.getElementById("clearQueue");
 const closeQueue = document.getElementById("closeQueue");
+const homeTitle = document.getElementById("homeTitle");
 const bitrateBtns = document.querySelectorAll(".bitrate-btn");
 const settingsButton = document.getElementById("settingsButton");
 const settingsPanel = document.getElementById("settingsPanel");
@@ -35,7 +36,7 @@ const changeFolder = document.getElementById("changeFolder");
 const folderError = document.getElementById("folderError");
 
 const PAGE = 10;
-const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false };
+const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null };
 
 const PLAY_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5 19 12 7 19.5z"/></svg>';
 const PAUSE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="3.6" height="14"/><rect x="13.9" y="5" width="3.6" height="14"/></svg>';
@@ -63,11 +64,13 @@ function useBridge() {
     resumeDownload: (id) => api.resume_download(id),
     getLibraryDir: () => api.get_library_dir(),
     setLibraryDir: (p, copy) => api.set_library_dir(p, copy),
+    getHome: () => api.get_home(),
   };
   state.ready = true;
   document.body.classList.add("native");
   refreshStatus();
   if (searchInput.value.trim()) runSearch(searchInput.value, false);
+  else loadHome();
   return true;
 }
 
@@ -197,12 +200,54 @@ function updateRowStates() {
 }
 
 function renderResults() {
+  if (state.mode === "home") {
+    resultsList.innerHTML = state.results.map(rowMarkup).join("");
+    emptyState.hidden = state.results.length > 0;
+    homeTitle.hidden = state.results.length === 0;
+    homeTitle.textContent = state.homeMode === "recommendations" ? "Recommended for you" : "Recently played & offline";
+    moreButton.hidden = true;
+    updateRowStates();
+    return;
+  }
+  homeTitle.hidden = true;
   resultsList.innerHTML = state.results.map(rowMarkup).join("");
   emptyState.hidden = state.results.length > 0;
   moreButton.hidden = state.results.length === 0 || state.results.length >= state.total;
   moreButton.textContent = state.loading ? "Loading..." : `Show more (${state.results.length}/${state.total})`;
   moreButton.disabled = state.loading;
   updateRowStates();
+}
+
+async function loadHome() {
+  if (!backend) return;
+  if (state.mode === "search" && state.query) return;
+  state.mode = "home";
+  state.query = "";
+  homeTitle.hidden = true;
+  moreButton.hidden = true;
+  if (state.home.length) {
+    state.results = state.home;
+    renderResults();
+    return;
+  }
+  emptyState.hidden = false;
+  emptyState.querySelector("p").textContent = "Loading home...";
+  try {
+    const data = await backend.getHome();
+    state.homeMode = data.mode;
+    state.home = data.items || [];
+    state.results = state.home;
+    if (!state.home.length) {
+      emptyState.hidden = false;
+      emptyState.querySelector("p").textContent = "Search for anything to start listening.";
+    }
+  } catch (_) {
+    state.home = [];
+    state.results = [];
+    emptyState.hidden = false;
+    emptyState.querySelector("p").textContent = "Search for anything to start listening.";
+  }
+  renderResults();
 }
 
 async function runSearch(query, append) {
@@ -213,6 +258,8 @@ async function runSearch(query, append) {
     emptyState.querySelector("p").textContent = "Backend not ready yet.";
     return;
   }
+  state.mode = "search";
+  homeTitle.hidden = true;
   state.loading = true;
   const offset = append ? state.results.length : 0;
   if (!append) {
@@ -504,6 +551,17 @@ searchForm.addEventListener("submit", (event) => {
   runSearch(searchInput.value, false);
 });
 
+searchInput.addEventListener("input", () => {
+  if (!searchInput.value.trim() && state.mode === "search") loadHome();
+});
+
+searchInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    searchInput.value = "";
+    loadHome();
+  }
+});
+
 moreButton.addEventListener("click", () => runSearch(state.query, true));
 playButton.addEventListener("click", () => togglePlayback());
 prevButton.addEventListener("click", () => playPrev());
@@ -638,3 +696,4 @@ audio.volume = Number(volume.value);
 renderQueue();
 renderResults();
 refreshStatus();
+if (!searchInput.value.trim()) loadHome();

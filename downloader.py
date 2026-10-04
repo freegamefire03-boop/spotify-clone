@@ -389,6 +389,12 @@ class DownloadManager:
             rec = self._downloads.get(video_id)
         return bool(rec) and rec.get("paused", False)
 
+    def has_active_downloads(self) -> bool:
+        with self._lock:
+            return any(
+                r.get("status") == "downloading" for r in self._downloads.values()
+            )
+
     def pause(self, video_id: str) -> None:
         self.set_paused(video_id, True)
 

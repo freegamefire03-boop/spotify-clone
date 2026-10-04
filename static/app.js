@@ -30,6 +30,9 @@ const closeSettings = document.getElementById("closeSettings");
 const memoryMode = document.getElementById("memoryMode");
 const continueCurrent = document.getElementById("continueCurrent");
 const queueDepth = document.getElementById("queueDepth");
+const libraryDir = document.getElementById("libraryDir");
+const changeFolder = document.getElementById("changeFolder");
+const folderError = document.getElementById("folderError");
 
 const PAGE = 10;
 const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false };
@@ -58,6 +61,8 @@ function useBridge() {
     reportPlayhead: (id, s) => api.report_playhead(id, s),
     pauseDownload: (id) => api.pause_download(id),
     resumeDownload: (id) => api.resume_download(id),
+    getLibraryDir: () => api.get_library_dir(),
+    setLibraryDir: (p, copy) => api.set_library_dir(p, copy),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -141,6 +146,9 @@ function openSettings() {
     continueCurrent.checked = !!s.continue_current;
     queueDepth.value = Number(s.queue_depth) || 0;
     queueDepth.disabled = !continueCurrent.checked;
+  }).catch(() => {});
+  backend.getLibraryDir().then((d) => {
+    if (d && d.path) libraryDir.value = d.path;
   }).catch(() => {});
 }
 
@@ -526,6 +534,33 @@ queueDepth.addEventListener("change", () => {
   const val = Math.max(1, Math.floor(Number(queueDepth.value) || 1));
   queueDepth.value = val;
   backend.setQueueDepth(val);
+});
+
+changeFolder.addEventListener("click", async () => {
+  const newPath = libraryDir.value.trim();
+  if (!newPath) return;
+  folderError.hidden = true;
+  const copy = confirm("Do you want to copy the existing audios to the new path?");
+  changeFolder.disabled = true;
+  try {
+    const res = await backend.setLibraryDir(newPath, copy);
+    if (!res.ok) {
+      folderError.textContent = res.error || "Could not change folder.";
+      folderError.hidden = false;
+    } else if (res.changed && copy) {
+      const skipped = res.skipped && res.skipped.length ? ` (${res.skipped.length} skipped)` : "";
+      folderError.textContent = `Moved to ${res.path}: ${res.copied} copied${skipped}.`;
+      folderError.hidden = false;
+      libraryDir.value = res.path;
+    } else if (res.changed) {
+      libraryDir.value = res.path;
+    }
+  } catch (_) {
+    folderError.textContent = "Could not change folder.";
+    folderError.hidden = false;
+  } finally {
+    changeFolder.disabled = false;
+  }
 });
 
 let lastPlayheadSent = -10;

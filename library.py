@@ -26,9 +26,24 @@ def get_library_dir() -> Path:
     return music
 
 
+def validate_library_dir(path: str | Path) -> Path:
+    """Check a library folder is usable: creatable + writable."""
+    raw = str(path or "").strip()
+    if not raw:
+        raise ValueError("folder path is empty")
+    p = Path(raw).expanduser()
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        probe = p / ".write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ValueError(f"folder is not creatable/writable: {raw} ({exc})") from exc
+    return p.resolve()
+
+
 def set_library_dir(path: str | Path) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
+    p = validate_library_dir(path)
     CONFIG_PATH.write_text(str(p), encoding="utf-8")
     return p
 

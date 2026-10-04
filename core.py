@@ -13,6 +13,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -1033,6 +1034,61 @@ class Api:
         depth = max(0, min(10, int(value)))
         settings.set("queue_depth", depth)
         return {"ok": True, "queue_depth": depth}
+
+    def get_library_dir(self) -> dict[str, Any]:
+        return {"ok": True, "path": str(library.get_library_dir())}
+
+    def set_library_dir(self, path: str, copy_existing: bool = False) -> dict[str, Any]:
+        """Change the download folder, optionally copying existing audios.
+
+        copy_existing=True copies finished .mp3 files to the new folder and
+        updates their DB paths; in-flight downloads block the change (their
+        .part paths were pinned at start time).
+        """
+        try:
+            new_dir = library.validate_library_dir(path)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            current = library.get_library_dir().resolve()
+        except OSError:
+            current = None
+        if current is not None and os.path.normcase(str(current)) == os.path.normcase(str(new_dir)):
+            return {"ok": True, "changed": False, "path": str(current)}
+        if download_manager.has_active_downloads():
+            return {"ok": False, "reason": "active-downloads",
+                    "error": "Wait for active downloads to finish first."}
+        if not copy_existing:
+            library.set_library_dir(new_dir)
+            return {"ok": True, "changed": True, "copied": 0, "path": str(new_dir)}
+        copied = 0
+        skipped: list[str] = []
+        tracks = library_db.list_tracks()
+        owner = {
+            Path(t["file_path"]).name: t["video_id"]
+            for t in tracks if t.get("file_path")
+        }
+        for track in tracks:
+            if track.get("status") != "mp3" or not track.get("file_path"):
+                continue
+            src = Path(track["file_path"])
+            if not src.is_file():
+                skipped.append(track["video_id"])
+                continue
+            dest = new_dir / src.name
+            if dest.exists() or owner.get(dest.name, track["video_id"]) != track["video_id"]:
+                dest = new_dir / f"{src.stem} [{track['video_id']}].mp3"
+            try:
+                shutil.copy2(src, dest)
+            except OSError:
+                skipped.append(track["video_id"])
+                continue
+            library_db.update_track(track["video_id"], file_path=str(dest))
+            owner[dest.name] = track["video_id"]
+            copied += 1
+        library.set_library_dir(new_dir)
+        return {"ok": True, "changed": True, "copied": copied,
+                "skipped": skipped, "total": len(tracks), "path": str(new_dir)}
 
     def _prefetch_upcoming(self, upcoming: Any, current_id: str) -> None:
         """Start background downloads for the next N queue items.

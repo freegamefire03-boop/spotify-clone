@@ -47,7 +47,7 @@ function useBridge() {
   backend = {
     search: (q, offset, limit) => api.search(q, offset, limit),
     status: () => api.status(),
-    play: (id, title, url) => api.play(id, title, url),
+    play: (id, title, url, upcoming) => api.play(id, title, url, upcoming ?? null),
     prepareTrack: (id) => api.prepare_track(id),
     setBitrate: (val) => api.set_bitrate(val),
     downloadProgress: (id) => api.download_progress(id),
@@ -294,8 +294,13 @@ async function playTrack(track) {
 
   // Register the track and kick off the local-library download before playback,
   // so /audio/<id> can serve the file (or the partial file) from disk.
+  // The upcoming window lets the backend prefetch the next queue items
+  // (Option 2); it trims to queue_depth and ignores it when Option 1 is off.
   if (backend && backend.play) {
-    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`).catch(() => {});
+    const upcoming = state.queue
+      .slice(state.qIndex + 1, state.qIndex + 1 + 5)
+      .map((t) => ({ id: t.id, title: t.title, url: `https://www.youtube.com/watch?v=${t.id}` }));
+    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, upcoming).catch(() => {});
   }
 
   // Wait until the server can serve a valid MP3 prefix before assigning src.

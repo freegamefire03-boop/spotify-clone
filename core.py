@@ -1016,11 +1016,45 @@ class Api:
         return {"ok": True}
 
     def set_queue_depth(self, value: int) -> dict[str, Any]:
-        depth = max(1, int(value))
+        depth = max(0, min(10, int(value)))
         settings.set("queue_depth", depth)
         return {"ok": True, "queue_depth": depth}
 
-    def play(self, video_id: str, title: str, url: str) -> dict[str, Any]:
+    def _prefetch_upcoming(self, upcoming: Any, current_id: str) -> None:
+        """Start background downloads for the next N queue items.
+
+        Only when continue_current (Option 1) is ON; queue_depth (Option 2)
+        says how many. Reuses DownloadManager.start() (dedupes active
+        downloads, skips disk cache hits, respects memory_mode). Never
+        touches playhead/paused flags — those belong to the current track.
+        """
+        try:
+            if not bool(settings.get("continue_current")):
+                return
+            depth = int(settings.get("queue_depth") or 0)
+        except (TypeError, ValueError):
+            return
+        if depth < 1 or not isinstance(upcoming, list):
+            return
+        bitrate = _current_bitrate()
+        memory = bool(settings.get("memory_mode"))
+        for item in upcoming[:depth][:10]:
+            try:
+                vid = item.get("id") if isinstance(item, dict) else None
+                if not vid or vid == current_id:
+                    continue
+                title = item.get("title") or vid
+                url = item.get("url") or f"https://www.youtube.com/watch?v={vid}"
+                track = library_db.get_track(vid)
+                if track and track.get("file_path") and Path(track["file_path"]).is_file():
+                    continue
+                download_manager.start(vid, title, url, bitrate, memory_mode=memory)
+            except Exception:  # noqa: BLE001 - one bad entry must not break play
+                continue
+
+    def play(
+        self, video_id: str, title: str, url: str, upcoming: Any = None
+    ) -> dict[str, Any]:
         """Register a track and start downloading it (called by the GUI on play)."""
         library_db.init_db()
         track = library_db.get_or_create_track(video_id, title, url, int(settings.get("bitrate") or 320))
@@ -1033,6 +1067,7 @@ class Api:
         # previous listen so the 10s-ahead gate doesn't start shut.
         download_manager.report_playhead(video_id, 0.0)
         download_manager.set_paused(video_id, False)
+        self._prefetch_upcoming(upcoming, current_id=video_id)
         return download_manager.get_progress(video_id)
 
     def resolve(self, video_id: str) -> dict[str, Any]:

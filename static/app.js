@@ -34,9 +34,27 @@ const queueDepth = document.getElementById("queueDepth");
 const libraryDir = document.getElementById("libraryDir");
 const changeFolder = document.getElementById("changeFolder");
 const folderError = document.getElementById("folderError");
+const menuButton = document.getElementById("menuButton");
+const sidenav = document.getElementById("sidenav");
+const edgeZone = document.getElementById("edgeZone");
 
 const PAGE = 10;
 const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null };
+
+const navState = { push: false, overlay: false };
+function renderNav() {
+  document.body.classList.toggle("nav-push", navState.push);
+  document.body.classList.toggle("nav-overlay", navState.overlay && !navState.push);
+  const open = navState.push || navState.overlay;
+  menuButton.setAttribute("aria-expanded", String(navState.push));
+  menuButton.setAttribute("aria-label", navState.push ? "Close navigation" : "Open navigation");
+  sidenav.setAttribute("aria-hidden", String(!open));
+}
+function setNav(push, overlay) {
+  navState.push = push;
+  navState.overlay = push ? false : overlay;
+  renderNav();
+}
 
 const PLAY_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5 19 12 7 19.5z"/></svg>';
 const PAUSE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="3.6" height="14"/><rect x="13.9" y="5" width="3.6" height="14"/></svg>';
@@ -559,6 +577,7 @@ searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     searchInput.value = "";
     loadHome();
+    if (navState.overlay) setNav(false, false);
   }
 });
 
@@ -568,6 +587,27 @@ prevButton.addEventListener("click", () => playPrev());
 nextButton.addEventListener("click", () => playNext());
 queueButton.addEventListener("click", () => { queuePanel.hidden = !queuePanel.hidden; });
 closeQueue.addEventListener("click", () => { queuePanel.hidden = true; });
+
+menuButton.addEventListener("click", () => setNav(!navState.push, false));
+edgeZone.addEventListener("mouseenter", () => {
+  if (!navState.push && !navState.overlay) setNav(false, true);
+});
+sidenav.addEventListener("mouseleave", () => {
+  if (navState.overlay && !navState.push) setNav(false, false);
+});
+sidenav.addEventListener("click", (event) => {
+  const btn = event.target.closest("[data-nav]");
+  if (!btn) return;
+  if (btn.dataset.nav === "home") loadHome();
+  if (btn.dataset.nav === "queue") queuePanel.hidden = false;
+  if (btn.dataset.nav === "settings") openSettings();
+  if (navState.overlay) setNav(false, false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && navState.overlay && document.activeElement !== searchInput) {
+    setNav(false, false);
+  }
+});
 
 clearQueue.addEventListener("click", () => {
   state.queue = [];

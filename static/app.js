@@ -30,6 +30,8 @@ const submitLinks = document.getElementById("submitLinks");
 const cancelLinks = document.getElementById("cancelLinks");
 const linksStatus = document.getElementById("linksStatus");
 const homeTitle = document.getElementById("homeTitle");
+const dlToolbar = document.getElementById("dlToolbar");
+const dlSort = document.getElementById("dlSort");
 const bitrateBtns = document.querySelectorAll(".bitrate-btn");
 const settingsButton = document.getElementById("settingsButton");
 const settingsBackdrop = document.getElementById("settingsBackdrop");
@@ -74,7 +76,7 @@ const sidenav = document.getElementById("sidenav");
 const edgeZone = document.getElementById("edgeZone");
 
 const PAGE = 10;
-const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null };
+const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null, dlSort: "recent", dlDownloads: [] };
 
 // --- Multi-select state (main #results only) ---
 const selectionSet = new Set();
@@ -783,6 +785,46 @@ function updateSelBar() {
   selAddBtn.textContent = `Add ${n} to queue`;
 }
 
+function sortDownloads(items, sortKey) {
+  const rows = (items || []).slice();
+  const withIdx = rows.map((t, i) => ({ t, i }));
+  const titleKey = (t) => String(t.title ?? "");
+  const cmpTitle = (a, b) =>
+    titleKey(a).localeCompare(titleKey(b), undefined, { sensitivity: "base" });
+  switch (sortKey) {
+    case "title":
+      withIdx.sort((x, y) => cmpTitle(x.t, y.t) || (x.i - y.i));
+      break;
+    case "artist": {
+      const name = (t) => String(t.channel ?? "").trim();
+      withIdx.sort((x, y) => {
+        const ax = name(x.t), ay = name(y.t);
+        const ex = ax === "", ey = ay === "";
+        if (ex !== ey) return ex ? 1 : -1;
+        const c = ax.localeCompare(ay, undefined, { sensitivity: "base" });
+        return c || cmpTitle(x.t, y.t) || (x.i - y.i);
+      });
+      break;
+    }
+    case "durAsc":
+      withIdx.sort((x, y) => ((Number(x.t.duration) || 0) - (Number(y.t.duration) || 0)) || cmpTitle(x.t, y.t) || (x.i - y.i));
+      break;
+    case "durDesc":
+      withIdx.sort((x, y) => ((Number(y.t.duration) || 0) - (Number(x.t.duration) || 0)) || cmpTitle(x.t, y.t) || (x.i - y.i));
+      break;
+    case "recent":
+    default:
+      break;
+  }
+  return withIdx.map((x) => x.t);
+}
+
+function applyDlSort() {
+  if (state.mode !== "downloads") return;
+  state.results = sortDownloads(state.dlDownloads, state.dlSort);
+  renderResults();
+}
+
 function renderResults() {
   if (state.mode === "home") {
     const sections = state.homeSections && state.homeSections.length
@@ -794,13 +836,28 @@ function renderResults() {
     emptyState.hidden = state.results.length > 0;
     homeTitle.hidden = true;
     moreButton.hidden = true;
+    dlToolbar.hidden = true;
     updateRowStates();
     return;
   }
   if (state.mode === "downloads") {
-    resultsList.innerHTML = (state.results.length
-      ? `<h2 class="home-section-title">Downloads</h2>` : "")
-      + state.results.map(rowMarkup).join("");
+    dlToolbar.hidden = state.dlDownloads.length === 0;
+    dlSort.value = state.dlSort;
+    if (!state.results.length) {
+      resultsList.innerHTML = "";
+    } else if (state.dlSort === "artist") {
+      let html = "";
+      let cur = null;
+      for (const t of state.results) {
+        const label = (t.channel || "").trim() || "Unknown channel";
+        if (label !== cur) { cur = label; html += `<h2 class="home-section-title">${escapeHtml(label)}</h2>`; }
+        html += rowMarkup(t);
+      }
+      resultsList.innerHTML = html;
+    } else {
+      resultsList.innerHTML = `<h2 class="home-section-title">Downloads</h2>`
+        + state.results.map(rowMarkup).join("");
+    }
     emptyState.hidden = state.results.length > 0;
     if (!state.results.length)
       emptyState.querySelector("p").textContent = "No downloads yet — play something to save it.";
@@ -810,6 +867,7 @@ function renderResults() {
     return;
   }
   homeTitle.hidden = true;
+  dlToolbar.hidden = true;
   resultsList.innerHTML = state.results.map(rowMarkup).join("");
   emptyState.hidden = state.results.length > 0;
   moreButton.hidden = state.results.length === 0 || state.results.length >= state.total;
@@ -859,6 +917,7 @@ async function loadDownloads() {
   searchInput.value = "";
   homeTitle.hidden = true;
   moreButton.hidden = true;
+  state.dlDownloads = [];
   state.results = [];
   state.total = 0;
   emptyState.hidden = false;
@@ -866,9 +925,12 @@ async function loadDownloads() {
   renderResults();
   try {
     const data = await backend.getDownloads();
-    state.results = data.items || [];
-    state.total = data.total ?? state.results.length;
+    state.dlDownloads = (data.items || []).slice();
+    state.total = data.total ?? state.dlDownloads.length;
+    state.results = sortDownloads(state.dlDownloads, state.dlSort);
+    dlSort.value = state.dlSort;
   } catch (_) {
+    state.dlDownloads = [];
     state.results = [];
     state.total = 0;
   }
@@ -1454,6 +1516,10 @@ searchInput.addEventListener("keydown", (event) => {
 });
 
 moreButton.addEventListener("click", () => runSearch(state.query, true));
+dlSort.addEventListener("change", () => {
+  state.dlSort = dlSort.value;
+  applyDlSort();
+});
 playButton.addEventListener("click", () => togglePlayback());
 prevButton.addEventListener("click", () => playPrev());
 nextButton.addEventListener("click", () => playNext());

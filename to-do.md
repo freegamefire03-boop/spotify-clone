@@ -5,7 +5,7 @@
 > - **Implemented:** persistent-library core, direct-to-MP3 downloading, offline replay from disk, instant-start playback (valid-frame gate + adaptive burst + `prepare_track` + hover prefetch; manual pre-buffer removed), hidden ffmpeg process, playback readiness/retry behavior, friendly network errors, YouTube URL search, search focus + `Ctrl+L`, MP3-quality switch (128/192/320), download-progress display, settings panel (memory mode, prefetch depth, download folder, cookies, session), memory-mode backend, queue prefetch, long-lived encode lanes (1 FG + 2 BG), orphan `.part` cleanup, skip/interrupt handling (cancel + delete, no resume), download-folder change flow + copy prompt, conditional home view, YouTube-style sidebar, watch history + home sections, session restore, cookie management UI.
 > - **Implemented 2026-10-06:** seek-beyond-edge hold-open (§5), panel exclusivity + dismiss, Home-button fix, progress-bar suppression on cache hits, queue add-links (**untested**, see §8), Downloads page, offline mode, settings-modal swap (preview polished: retired Continue toggle replaced by Offline mode, stepper fixed to 0–10, all settings wired, live mini-player).
 > - **Implemented then superseded:** 10s-ahead pacing and pause-securing-10s were built, then removed by the playback-lane fix — downloads are now uncapped with a stall watchdog (see §1). `continue_current` setting retired.
-> - **Still pending:** re-test of queue add-links dedupe in a clean interpreter (see §8); live/GUI confirmation of the 2026-10-06 items in the running app; the §8 selection/dblclick/rubber-band items; the §9 queue-reorder, real-channel, and downloads-filters items.
+> - **Still pending:** re-test of queue add-links dedupe in a clean interpreter (see §8); live/GUI confirmation of all 2026-10-06 items in the running app (selection, dblclick, rubber-band, grip-reorder, channel display, downloads sorts, modal footer, seek hold-open, offline mode).
 
 ## 1. Playback-aware downloading
 
@@ -127,6 +127,12 @@ are unchanged; complete files still use exact-total 206s (`_serve_file`).
 
 ## 8. Round-2 UI work (noted 2026-10-04, implemented 2026-10-06)
 
+**Loop 2 (2026-10-06):** selection model (`selectionSet` + caret + anchor,
+main list only) + floating "Add N to queue" bar, dblclick-to-play (keeps
+first-click selection), and main-list rubber-band select (plain/Ctrl/Shift,
+autoscroll, Esc cancel) all implemented. Queue keeps click-play + grip
+reorder, no selection.
+
 - Panel exclusivity + dismiss (do first): the queue panel and settings panel
   must never overlap/coexist — opening one closes the other. The queue panel
   must close instantly on focus loss, on outside click, and on its close
@@ -186,7 +192,16 @@ are unchanged; complete files still use exact-total 206s (`_serve_file`).
   First improve it to completion (fully polished, all settings wired), *then*
   swap the app's settings panel with it — not before.
 
-## 9. Round-3 work (added 2026-10-06, pending)
+## 9. Round-3 work (added 2026-10-06, implemented 2026-10-06)
+
+**Loop 2 (2026-10-06):** queue grip-reorder (hover ⋮⋮ handle, live indicator,
+`qIndex` follows, Esc cancels), real channel everywhere (DB `channel` column +
+migration, capture at resolve/download/gui, lazy backfill, honest "Unknown
+channel" fallback until replayed), and Downloads filters (sort: recent /
+title / artist / duration ↑↓, artist group headers) all implemented. Also
+fixed: the settings-modal footer (`mFooterClose`) was silently dropped from
+the 8-g swap and restored — without it the modal's wiring script threw at
+load.
 
 - Queue drag-reorder: reorder *inside the queue panel* by dragging a
   grip handle only (this is the "future reorder/DnD" the §8 rubber-band item

@@ -429,6 +429,7 @@ function sleep(ms) {
 }
 
 let dlPollTimer = null;
+let dlPollGen = 0;
 
 function formatBytes(bytes) {
   if (!bytes || bytes <= 0) return "0 B";
@@ -438,39 +439,69 @@ function formatBytes(bytes) {
 }
 
 function stopDlPolling() {
+  dlPollGen++;
   if (dlPollTimer) { clearInterval(dlPollTimer); dlPollTimer = null; }
 }
 
-function startDlPolling(videoId) {
+async function startDlPolling(videoId) {
   stopDlPolling();
+  const gen = dlPollGen;
   const el = document.getElementById("npDownload");
   const fill = document.getElementById("npDlFill");
   const text = document.getElementById("npDlText");
+
+  let data;
+  try {
+    data = await backend.downloadProgress(videoId);
+  } catch (_) {
+    return;
+  }
+
+  if ((data.status || "unknown") === "unknown") {
+    const deadline = Date.now() + 3000;
+    while ((data.status || "unknown") === "unknown" && Date.now() < deadline) {
+      await sleep(500);
+      if (gen !== dlPollGen) return;
+      try {
+        data = await backend.downloadProgress(videoId);
+      } catch (_) {
+        return;
+      }
+    }
+  }
+  if (gen !== dlPollGen) return;
+  if ((data.status || "unknown") !== "downloading") return;
+
+  const written = Number(data.written) || 0;
+  const total = Number(data.total) || 0;
+  const pct = total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0;
   el.hidden = false;
-  fill.style.width = "0%";
-  text.textContent = "Starting download...";
+  fill.style.width = pct + "%";
+  text.textContent = total > 0
+    ? `${formatBytes(written)} / ${formatBytes(total)} (${pct}%)`
+    : "Starting download...";
 
   dlPollTimer = setInterval(async () => {
     if (!backend) return;
     try {
-      const data = await backend.downloadProgress(videoId);
-      const status = data.status || "unknown";
-      const written = Number(data.written) || 0;
-      const total = Number(data.total) || 0;
-      const pct = total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0;
+      const d = await backend.downloadProgress(videoId);
+      const st = d.status || "unknown";
+      const w = Number(d.written) || 0;
+      const t = Number(d.total) || 0;
+      const p = t > 0 ? Math.min(100, Math.round((w / t) * 100)) : 0;
 
-      if (status === "downloading") {
-        fill.style.width = pct + "%";
-        text.textContent = total > 0
-          ? `${formatBytes(written)} / ${formatBytes(total)} (${pct}%)`
-          : `${formatBytes(written)} downloaded`;
-      } else if (status === "done") {
+      if (st === "downloading") {
+        fill.style.width = p + "%";
+        text.textContent = t > 0
+          ? `${formatBytes(w)} / ${formatBytes(t)} (${p}%)`
+          : `${formatBytes(w)} downloaded`;
+      } else if (st === "done") {
         fill.style.width = "100%";
         text.textContent = "Download complete";
         stopDlPolling();
         setTimeout(() => { el.hidden = true; }, 2000);
-      } else if (status === "failed" || status === "cancelled") {
-        text.textContent = status === "failed" ? "Download failed" : "Download cancelled";
+      } else if (st === "failed" || st === "cancelled") {
+        text.textContent = st === "failed" ? "Download failed" : "Download cancelled";
         stopDlPolling();
         setTimeout(() => { el.hidden = true; }, 2000);
       }

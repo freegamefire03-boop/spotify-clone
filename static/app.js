@@ -266,9 +266,9 @@ function renderResults() {
 
 async function loadHome() {
   if (!backend) return;
-  if (state.mode === "search" && state.query) return;
   state.mode = "home";
   state.query = "";
+  searchInput.value = "";
   homeTitle.hidden = true;
   moreButton.hidden = true;
   if (state.home.length) {

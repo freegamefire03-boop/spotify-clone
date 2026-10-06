@@ -1135,6 +1135,34 @@ class _AdaptiveGate:
             self._t0, self._bytes_at_t0 = now, size
 
 
+def _partial_range_start(range_header: Optional[str]) -> Optional[int]:
+    """Start offset of a Range header, or None if no usable range.
+
+    Only the start matters on a growing stream; the end is ignored (we
+    stream to the growth edge). Suffix ranges (`bytes=-N`) are meaningless
+    while the total is unknown -> None (caller does the 200 flow).
+    Returns the raw int including 0; caller treats None *and* 0 as
+    "no seek" (initial-load 200 flow) so `Range: bytes=0-` behaves
+    exactly as today.
+    """
+    if not range_header or not range_header.startswith("bytes="):
+        return None
+    spec = range_header[6:].split(",")[0].strip()
+    if "-" not in spec:
+        return None
+    start_text, _, _ = spec.partition("-")
+    start_text = start_text.strip()
+    if not start_text:
+        return None
+    try:
+        start = int(start_text)
+    except ValueError:
+        return None
+    if start < 0:
+        return None
+    return start
+
+
 def _serve_partial(
     start_response: Callable, video_id: str, path: Path, total: int, range_header: Optional[str]
 ):
@@ -1143,7 +1171,11 @@ def _serve_partial(
     No Content-Length is sent while the file grows — advertising a length the
     body cannot reach would abort playback. The response simply stays open until
     ffmpeg finishes, which is what Chromium expects from a growing stream.
-    Seeks are refused while growing (see to-do.md item 5).
+
+    Seeks past the written edge are held open (to-do.md item 5, approach 1):
+    the Range request waits (bounded 30s) for the encoder to write past the
+    requested start, then serves 206 from that offset on the same channel.
+    `total` is an estimate, never used as a Content-Range total.
     """
     part = download_manager.part_path(video_id) or path
     bitrate = _current_bitrate()
@@ -1177,24 +1209,127 @@ def _serve_partial(
         gate.tick(part)
         time.sleep(0.02)
 
-    start_response("200 OK", [
+    seek_start = _partial_range_start(range_header)
+
+    if not seek_start:
+        start_response("200 OK", [
+            ("Content-Type", "audio/mpeg"),
+            ("Cache-Control", "no-store"),
+            ("Accept-Ranges", "bytes"),
+        ])
+
+        def generate() -> Iterator[bytes]:
+            # Handles are opened per read and closed immediately, so ffmpeg is never
+            # blocked by us when it renames the finished file (Windows: WinError 32).
+            # When that rename happens mid-stream we follow the file to its new name.
+            source = part
+            sent = 0
+            last_size = -1
+            idle_since = time.monotonic()
+            try:
+                while True:
+                    if not source.exists() and source != path and path.exists():
+                        source = path          # the .part was published as the final file
+                    try:
+                        size = source.stat().st_size
+                    except OSError:
+                        size = last_size
+                    available = size - sent
+                    if available > 0:
+                        _register_reader(str(source))
+                        try:
+                            with open(source, "rb") as handle:
+                                handle.seek(sent)
+                                block = handle.read(min(CHUNK, available))
+                        finally:
+                            _release_reader(str(source))
+                        if not block:
+                            time.sleep(0.05)
+                            continue
+                        sent += len(block)
+                        last_size = size
+                        idle_since = time.monotonic()
+                        yield block
+                    elif download_manager.is_active(video_id):
+                        # safety net: a download that died without reporting must not
+                        # keep this response open forever. A user-paused download
+                        # legitimately shows no growth, so the watchdog is
+                        # suspended while paused.
+                        if size != last_size:
+                            last_size = size
+                            idle_since = time.monotonic()
+                        elif download_manager.is_paused(video_id):
+                            idle_since = time.monotonic()
+                        elif time.monotonic() - idle_since > 30.0:
+                            return
+                        time.sleep(0.05)
+                    else:
+                        break
+            except (PermissionError, FileNotFoundError):
+                return
+
+        return generate()
+
+    def _grown_size() -> int:
+        try:
+            if part.exists():
+                return part.stat().st_size
+        except OSError:
+            pass
+        try:
+            if path != part and path.exists():
+                return path.stat().st_size
+        except OSError:
+            pass
+        return 0
+
+    def _range_unsatisfiable():
+        body = b"range start beyond buffered bytes"
+        start_response("416 Range Not Satisfiable", [
+            ("Content-Type", "text/plain"),
+            ("Content-Range", "bytes */*"),
+            ("Content-Length", str(len(body))),
+            ("Accept-Ranges", "bytes"),
+            ("Cache-Control", "no-store"),
+        ])
+        return [body]
+
+    if download_manager.is_paused(video_id):
+        return _range_unsatisfiable()
+    if not download_manager.is_active(video_id):
+        if _grown_size() <= seek_start:
+            return _range_unsatisfiable()
+    else:
+        wait_until = time.monotonic() + 30.0
+        while True:
+            if _grown_size() > seek_start:
+                break
+            if download_manager.is_paused(video_id):
+                return _range_unsatisfiable()
+            if not download_manager.is_active(video_id):
+                if _grown_size() > seek_start:
+                    break
+                return _range_unsatisfiable()
+            if time.monotonic() >= wait_until:
+                return _range_unsatisfiable()
+            time.sleep(0.05)
+
+    start_response("206 Partial Content", [
         ("Content-Type", "audio/mpeg"),
+        ("Content-Range", f"bytes {seek_start}-/*"),
+        ("Accept-Ranges", "bytes"),
         ("Cache-Control", "no-store"),
-        ("Accept-Ranges", "none"),
     ])
 
-    def generate() -> Iterator[bytes]:
-        # Handles are opened per read and closed immediately, so ffmpeg is never
-        # blocked by us when it renames the finished file (Windows: WinError 32).
-        # When that rename happens mid-stream we follow the file to its new name.
+    def generate_from_offset() -> Iterator[bytes]:
         source = part
-        sent = 0
+        sent = seek_start
         last_size = -1
         idle_since = time.monotonic()
         try:
             while True:
                 if not source.exists() and source != path and path.exists():
-                    source = path          # the .part was published as the final file
+                    source = path
                 try:
                     size = source.stat().st_size
                 except OSError:
@@ -1216,10 +1351,6 @@ def _serve_partial(
                     idle_since = time.monotonic()
                     yield block
                 elif download_manager.is_active(video_id):
-                    # safety net: a download that died without reporting must not
-                    # keep this response open forever. A user-paused download
-                    # legitimately shows no growth, so the watchdog is
-                    # suspended while paused.
                     if size != last_size:
                         last_size = size
                         idle_since = time.monotonic()
@@ -1233,7 +1364,7 @@ def _serve_partial(
         except (PermissionError, FileNotFoundError):
             return
 
-    return generate()
+    return generate_from_offset()
 
 
 def _prepare_track(video_id: str) -> dict[str, Any]:

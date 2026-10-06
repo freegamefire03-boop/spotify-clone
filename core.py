@@ -479,6 +479,48 @@ def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
     }
 
 
+MAX_ADD_LINKS = 50
+
+
+def add_links(text: str) -> dict[str, Any]:
+    """Resolve a pasted batch of YouTube links into queue rows."""
+    tokens = (text or "").split()
+    if not tokens:
+        return {"ok": False, "error": "Paste at least one YouTube link."}
+
+    items: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_urls: set[str] = set()
+    skipped = 0
+    errors: list[str] = []
+
+    for token in tokens[:MAX_ADD_LINKS]:
+        parsed = parse_youtube_url(token)
+        if parsed is None:
+            skipped += 1
+            continue
+        if parsed["url"] in seen_urls:
+            continue
+        seen_urls.add(parsed["url"])
+        try:
+            rows = _fetch_url_items(parsed)
+        except Exception as exc:  # noqa: BLE001 - keep going through the batch
+            errors.append(friendly_network_error(exc))
+            continue
+        for row in rows:
+            if row["id"] in seen_ids:
+                continue
+            seen_ids.add(row["id"])
+            items.append(row)
+
+    if not items:
+        if errors:
+            return {"ok": False, "error": errors[0]}
+        return {"ok": False, "error": "No YouTube links found in that text."}
+
+    return {"ok": True, "items": items, "skipped": skipped, "errors": errors}
+
+
 # --------------------------------------------------------------------------- #
 # audio stream resolution
 # --------------------------------------------------------------------------- #
@@ -1222,6 +1264,9 @@ class Api:
 
     def search(self, query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
         return search(query, offset, limit)
+
+    def add_links(self, text: str) -> dict[str, Any]:
+        return add_links(text)
 
     def status(self) -> dict[str, Any]:
         return {

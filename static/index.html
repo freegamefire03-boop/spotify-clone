@@ -58,8 +58,17 @@
     <div class="queue-head">
       <span>Queue (<span id="queueCount">0</span>)</span>
       <div>
+        <button id="addLinks" class="link-button">Add links</button>
         <button id="clearQueue" class="link-button">Clear</button>
         <button id="closeQueue" class="icon-button" title="Hide queue" aria-label="Hide queue">&times;</button>
+      </div>
+    </div>
+    <div class="queue-add" id="queueAdd" hidden>
+      <textarea id="queueLinks" rows="3" spellcheck="false" placeholder="Paste YouTube links, one per line..."></textarea>
+      <div class="queue-add-actions">
+        <button id="submitLinks" class="text-button">Add</button>
+        <button id="cancelLinks" class="link-button">Cancel</button>
+        <span class="queue-add-status" id="linksStatus"></span>
       </div>
     </div>
     <ul id="queueList"></ul>

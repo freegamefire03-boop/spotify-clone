@@ -23,6 +23,12 @@ const queueList = document.getElementById("queueList");
 const queueCount = document.getElementById("queueCount");
 const clearQueue = document.getElementById("clearQueue");
 const closeQueue = document.getElementById("closeQueue");
+const addLinks = document.getElementById("addLinks");
+const queueAdd = document.getElementById("queueAdd");
+const queueLinks = document.getElementById("queueLinks");
+const submitLinks = document.getElementById("submitLinks");
+const cancelLinks = document.getElementById("cancelLinks");
+const linksStatus = document.getElementById("linksStatus");
 const homeTitle = document.getElementById("homeTitle");
 const bitrateBtns = document.querySelectorAll(".bitrate-btn");
 const settingsButton = document.getElementById("settingsButton");
@@ -91,6 +97,7 @@ function useBridge() {
     getCookieStatus: () => api.get_cookie_status(),
     setCookiesFromText: (t, ow) => api.set_cookies_from_text(t, ow),
     removeCookies: () => api.remove_cookies(),
+    addLinks: (text) => api.add_links(text),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -556,6 +563,50 @@ function addToQueue(track) {
   scheduleSaveSession();
 }
 
+function toggleAddLinks() {
+  queueAdd.hidden = !queueAdd.hidden;
+  if (!queueAdd.hidden) {
+    linksStatus.textContent = "";
+    queueLinks.value = "";
+    queueLinks.focus();
+  }
+}
+
+async function submitQueueLinks() {
+  const text = queueLinks.value;
+  if (!text.trim()) {
+    linksStatus.textContent = "Paste some links first.";
+    return;
+  }
+  linksStatus.textContent = "Resolving...";
+  submitLinks.disabled = true;
+  try {
+    const res = await backend.addLinks(text);
+    if (!res || !res.ok) {
+      linksStatus.textContent = (res && res.error) || "Could not add links.";
+      return;
+    }
+    const items = Array.isArray(res.items) ? res.items : [];
+    const existing = new Set(state.queue.map((t) => t.id));
+    let added = 0;
+    for (const track of items) {
+      if (!track || !track.id || existing.has(track.id)) continue;
+      existing.add(track.id);
+      addToQueue(track);
+      added++;
+    }
+    const parts = [`Added ${added} track${added === 1 ? "" : "s"}`];
+    if (res.skipped) parts.push(`${res.skipped} skipped`);
+    if (res.errors && res.errors.length) parts.push(`${res.errors.length} failed`);
+    linksStatus.textContent = parts.join(", ");
+    queueLinks.value = "";
+  } catch (_) {
+    linksStatus.textContent = "Could not add links.";
+  } finally {
+    submitLinks.disabled = false;
+  }
+}
+
 let sessionSaveTimer = null;
 function sanitizeQueueForSave() {
   return state.queue.slice(0, 100).map((t) => ({
@@ -737,6 +788,16 @@ clearQueue.addEventListener("click", () => {
   renderQueue();
   updateRowStates();
   scheduleSaveSession();
+});
+
+addLinks.addEventListener("click", toggleAddLinks);
+cancelLinks.addEventListener("click", toggleAddLinks);
+submitLinks.addEventListener("click", submitQueueLinks);
+queueLinks.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    submitQueueLinks();
+  }
 });
 
 function refreshHomeAfterCookieChange() {

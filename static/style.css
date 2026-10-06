@@ -201,6 +201,24 @@ body.nav-push .content, body.nav-push .player { margin-left: var(--sidenav-w); }
 .queue-item .q-remove:hover { color: #fff; }
 .queue-item.is-current .q-title { color: #1db954; }
 
+.queue-add { margin-bottom: 8px; }
+#queueLinks {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  box-sizing: border-box;
+  background: #242424;
+  color: #fff;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: Consolas, monospace;
+  padding: 6px;
+}
+#queueLinks:focus { border-color: #1db954; outline: none; }
+.queue-add-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.queue-add-status { font-size: 11px; color: #8a8a8a; }
+
 /* ---------- player (pinned to the window bottom) ---------- */
 .player {
   flex: 0 0 auto;

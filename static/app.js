@@ -531,7 +531,7 @@ function useBridge() {
   backend = {
     search: (q, offset, limit) => api.search(q, offset, limit),
     status: () => api.status(),
-    play: (id, title, url, upcoming, prevId, priority, prefetchOnly) => api.play(id, title, url, upcoming ?? null, prevId ?? null, priority ?? 0, prefetchOnly ?? false),
+    play: (id, title, url, upcoming, prevId, priority, prefetchOnly, channel) => api.play(id, title, url, upcoming ?? null, prevId ?? null, priority ?? 0, prefetchOnly ?? false, channel ?? ""),
     prepareTrack: (id) => api.prepare_track(id),
     setBitrate: (val) => api.set_bitrate(val),
     downloadProgress: (id) => api.download_progress(id),
@@ -1030,10 +1030,10 @@ async function playTrack(track, _skipSeen = new Set()) {
   if (backend && backend.play) {
     const upcoming = state.queue
       .slice(state.qIndex + 1, state.qIndex + 1 + 5)
-      .map((t) => ({ id: t.id, title: t.title, url: `https://www.youtube.com/watch?v=${t.id}` }));
+      .map((t) => ({ id: t.id, title: t.title, url: `https://www.youtube.com/watch?v=${t.id}`, channel: t.channel || "" }));
     let playRes = null;
     try {
-      playRes = await backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, upcoming, prevId);
+      playRes = await backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, upcoming, prevId, 0, false, track.channel || "");
     } catch (_) { playRes = null; }
     if (playRes && playRes.skipped) {
       _skipSeen.add(track.id);
@@ -1405,7 +1405,7 @@ resultsList.addEventListener("mouseover", (event) => {
   hoverTimer = setTimeout(() => {
     // Hover warmup: background lane (priority 1), prefetch-only (no play
     // history, no playhead/paused disturbance). Never queues ahead of clicks.
-    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, null, null, 1, true).catch(() => {});
+    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, null, null, 1, true, track.channel || "").catch(() => {});
   }, 150);
 });
 

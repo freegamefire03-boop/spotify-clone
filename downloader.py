@@ -182,6 +182,7 @@ class DownloadManager:
         bitrate: int = 320,
         memory_mode: bool = False,
         priority: int = FG_PRIORITY,
+        channel: str = "",
     ) -> Optional[Path]:
         """Resolve the audio URL and stream it into a growing MP3.
 
@@ -192,7 +193,8 @@ class DownloadManager:
         concurrent duplicate starts are absorbed before any job is queued.
         """
         library_db.init_db()
-        track = library_db.get_or_create_track(video_id, title, url, bitrate)
+        track = library_db.get_or_create_track(
+            video_id, title, url, bitrate, channel=str(channel or "")[:200])
 
         # Cache hit: completed file exists on disk
         if not memory_mode and track.get("status") == "mp3" and track.get("file_path"):
@@ -639,6 +641,13 @@ class DownloadManager:
                     rec["duration"] = duration
                     rec["total"] = int(duration * bitrate * 1000 / 8) if duration else 0
 
+            _ch = str(info.get("channel") or info.get("uploader") or "").strip()[:200]
+            if _ch:
+                try:
+                    library_db.update_track(video_id, channel=_ch)
+                except Exception:
+                    pass
+
             if not direct:
                 raise RuntimeError("could not resolve a direct audio URL")
             if not self._job_live(video_id, token):
@@ -793,6 +802,13 @@ class DownloadManager:
                 if rec is not None:
                     rec["duration"] = duration
                     rec["total"] = int(duration * bitrate * 1000 / 8) if duration else 0
+
+            _ch = str(info.get("channel") or info.get("uploader") or "").strip()[:200]
+            if _ch:
+                try:
+                    library_db.update_track(video_id, channel=_ch)
+                except Exception:
+                    pass
 
             if not direct:
                 raise RuntimeError("could not resolve a direct audio URL")

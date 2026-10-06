@@ -18,6 +18,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracks (
     video_id        TEXT PRIMARY KEY,
     title           TEXT NOT NULL,
+    channel         TEXT NOT NULL DEFAULT '',
     url             TEXT NOT NULL,
     file_path       TEXT,
     status          TEXT NOT NULL,
@@ -48,6 +49,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0")
     if "last_played_at" not in existing:
         conn.execute("ALTER TABLE tracks ADD COLUMN last_played_at TEXT")
+    if "channel" not in existing:
+        conn.execute("ALTER TABLE tracks ADD COLUMN channel TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -68,42 +71,48 @@ def init_db() -> None:
         conn.commit()
 
 
-def add_track(video_id: str, title: str, url: str, bitrate: int = 320, duration: int = 0) -> None:
-    """Insert a track, or refresh its title/url if it already exists.
+def add_track(video_id: str, title: str, url: str, bitrate: int = 320, duration: int = 0, channel: str = "") -> None:
+    """Insert a track, or refresh its title/url/channel if it already exists.
 
     Preserves file_path and status on conflict — never wipes existing state.
+    A known channel is never overwritten with an empty one.
     """
+    channel = str(channel or "")[:200]
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO tracks (video_id, title, url, file_path, status, bitrate, duration, created_at)
-            VALUES (?, ?, ?, NULL, 'downloading', ?, ?, ?)
+            INSERT INTO tracks (video_id, title, channel, url, file_path, status, bitrate, duration, created_at)
+            VALUES (?, ?, ?, ?, NULL, 'downloading', ?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
                 title = excluded.title,
-                url = excluded.url
+                url = excluded.url,
+                channel = CASE WHEN excluded.channel <> '' THEN excluded.channel ELSE tracks.channel END
             """,
-            (video_id, title, url, bitrate, duration, _now()),
+            (video_id, title, channel, url, bitrate, duration, _now()),
         )
         conn.commit()
 
 
 def get_or_create_track(
-    video_id: str, title: str, url: str, bitrate: int = 320, duration: int = 0
+    video_id: str, title: str, url: str, bitrate: int = 320, duration: int = 0, channel: str = ""
 ) -> dict[str, Any]:
     """Upsert track metadata and return the current row.
 
     Returns the existing row with file_path/status intact on conflict.
+    A known channel is never overwritten with an empty one.
     """
+    channel = str(channel or "")[:200]
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO tracks (video_id, title, url, file_path, status, bitrate, duration, created_at)
-            VALUES (?, ?, ?, NULL, 'downloading', ?, ?, ?)
+            INSERT INTO tracks (video_id, title, channel, url, file_path, status, bitrate, duration, created_at)
+            VALUES (?, ?, ?, ?, NULL, 'downloading', ?, ?, ?)
             ON CONFLICT(video_id) DO UPDATE SET
                 title = excluded.title,
-                url = excluded.url
+                url = excluded.url,
+                channel = CASE WHEN excluded.channel <> '' THEN excluded.channel ELSE tracks.channel END
             """,
-            (video_id, title, url, bitrate, duration, _now()),
+            (video_id, title, channel, url, bitrate, duration, _now()),
         )
         row = conn.execute("SELECT * FROM tracks WHERE video_id = ?", (video_id,)).fetchone()
         conn.commit()

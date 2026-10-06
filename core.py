@@ -245,7 +245,7 @@ def _normalize(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": entry.get("id"),
         "title": entry.get("title") or "Unknown title",
-        "channel": entry.get("channel") or entry.get("uploader") or "",
+        "channel": str(entry.get("channel") or entry.get("uploader") or "").strip()[:200],
         "duration": int(entry.get("duration") or 0),
         "thumbnail": _thumbnail(entry),
     }
@@ -339,7 +339,14 @@ def _fetch_url_items(parsed: dict[str, str]) -> list[dict[str, Any]]:
     if parsed["kind"] == "playlist":
         entries = [e for e in (info.get("entries") or []) if e and e.get("id")]
         return [_normalize(e) for e in entries[:SEARCH_POOL]]
-    return [_normalize(info)]
+    row = _normalize(info)
+    _ch = row.get("channel") or ""
+    if _ch and info.get("id"):
+        try:
+            library_db.update_track(info["id"], channel=_ch)
+        except Exception:
+            pass
+    return [row]
 
 
 def _fetch_search(query: str) -> list[dict[str, Any]]:
@@ -375,7 +382,7 @@ def _library_home_items(limit: int = HOME_LIMIT) -> list[dict[str, Any]]:
         out.append({
             "id": vid,
             "title": t.get("title") or "Unknown title",
-            "channel": "",
+            "channel": t.get("channel") or "",
             "duration": int(t.get("duration") or 0),
             "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
         })
@@ -389,7 +396,7 @@ def _recent_home_items(limit: int = 10) -> list[dict[str, Any]]:
         out.append({
             "id": vid,
             "title": t.get("title") or "Unknown title",
-            "channel": "",
+            "channel": t.get("channel") or "",
             "duration": int(t.get("duration") or 0),
             "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
             "play_count": int(t.get("play_count") or 0),
@@ -417,7 +424,7 @@ def get_downloads() -> dict[str, Any]:
             {
                 "id": vid,
                 "title": t.get("title") or "Unknown title",
-                "channel": "",
+                "channel": t.get("channel") or "",
                 "duration": int(t.get("duration") or 0),
                 "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
                 "file_size": int(t.get("file_size") or 0),
@@ -515,7 +522,7 @@ def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
             matches.append({
                 "id": vid,
                 "title": title or "Unknown title",
-                "channel": "",
+                "channel": t.get("channel") or "",
                 "duration": int(t.get("duration") or 0),
                 "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
             })
@@ -1001,9 +1008,10 @@ def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]],
     url = track.get("url") or f"https://www.youtube.com/watch?v={video_id}"
     bitrate = _current_bitrate()
     memory = bool(settings.get("memory_mode"))
+    channel = str((track or {}).get("channel") or "")[:200]
     return download_manager.start(
         video_id, title, url, bitrate, memory_mode=memory,
-        priority=priority,
+        priority=priority, channel=channel,
     )
 
 
@@ -1664,12 +1672,13 @@ class Api:
                     continue
                 title = item.get("title") or vid
                 url = item.get("url") or f"https://www.youtube.com/watch?v={vid}"
+                channel = str(item.get("channel") or "")[:200] if isinstance(item, dict) else ""
                 track = library_db.get_track(vid)
                 if track and track.get("file_path") and Path(track["file_path"]).is_file():
                     continue
                 download_manager.start(
                     vid, title, url, bitrate, memory_mode=memory,
-                    priority=downloader.BG_PRIORITY,
+                    priority=downloader.BG_PRIORITY, channel=channel,
                 )
             except Exception:  # noqa: BLE001 - one bad entry must not break play
                 continue
@@ -1716,6 +1725,7 @@ class Api:
     def play(
         self, video_id: str, title: str, url: str, upcoming: Any = None,
         prev_id: Any = None, priority: Any = None, prefetch_only: Any = False,
+        channel: str = "",
     ) -> dict[str, Any]:
         """Register a track and start downloading it (called by the GUI on play).
 
@@ -1776,7 +1786,9 @@ class Api:
                 self._reap_orphan_part(str(prev_id))
             except Exception:  # noqa: BLE001 - reaping must never break play
                 pass
-        track = library_db.get_or_create_track(video_id, title, url, int(settings.get("bitrate") or 320))
+        track = library_db.get_or_create_track(
+            video_id, title, url, int(settings.get("bitrate") or 320),
+            channel=str(channel or "")[:200])
         if not warming:
             try:
                 library_db.record_play(video_id)

@@ -5,7 +5,7 @@
 > - **Implemented:** persistent-library core, direct-to-MP3 downloading, offline replay from disk, instant-start playback (valid-frame gate + adaptive burst + `prepare_track` + hover prefetch; manual pre-buffer removed), hidden ffmpeg process, playback readiness/retry behavior, friendly network errors, YouTube URL search, search focus + `Ctrl+L`, MP3-quality switch (128/192/320), download-progress display, settings panel (memory mode, prefetch depth, download folder, cookies, session), memory-mode backend, queue prefetch, long-lived encode lanes (1 FG + 2 BG), orphan `.part` cleanup, skip/interrupt handling (cancel + delete, no resume), download-folder change flow + copy prompt, conditional home view, YouTube-style sidebar, watch history + home sections, session restore, cookie management UI.
 > - **Implemented 2026-10-06:** seek-beyond-edge hold-open (§5), panel exclusivity + dismiss, Home-button fix, progress-bar suppression on cache hits, queue add-links (**untested**, see §8), Downloads page, offline mode, settings-modal swap (preview polished: retired Continue toggle replaced by Offline mode, stepper fixed to 0–10, all settings wired, live mini-player).
 > - **Implemented then superseded:** 10s-ahead pacing and pause-securing-10s were built, then removed by the playback-lane fix — downloads are now uncapped with a stall watchdog (see §1). `continue_current` setting retired.
-> - **Still pending:** re-test of queue add-links dedupe in a clean interpreter (see §8); live/GUI confirmation of the 2026-10-06 items in the running app.
+> - **Still pending:** re-test of queue add-links dedupe in a clean interpreter (see §8); live/GUI confirmation of the 2026-10-06 items in the running app; the §8 selection/dblclick/rubber-band items; the §9 queue-reorder, real-channel, and downloads-filters items.
 
 ## 1. Playback-aware downloading
 
@@ -178,6 +178,26 @@ are unchanged; complete files still use exact-total 206s (`_serve_file`).
 - Settings panel swap: `preview.html` holds a settings-modal redesign proposal.
   First improve it to completion (fully polished, all settings wired), *then*
   swap the app's settings panel with it — not before.
+
+## 9. Round-3 work (added 2026-10-06, pending)
+
+- Queue drag-reorder: click-and-drag rows *inside the queue panel* reorders
+  the queue (this is the "future reorder/DnD" the §8 rubber-band item reserves
+  drags on already-selected rows for — selection rubber-banding stays in the
+  main list, queue drags reorder). Dropping a row inserts it at the drop
+  position; the playing index (`qIndex`) must follow the moved track; the new
+  order persists to the session. Touch/pointer + mouse; Esc cancels mid-drag.
+- Real channel everywhere: every title must show its channel name (the artist),
+  never "Unknown channel". yt-dlp provides the channel without problem, but
+  today it is lost: flat search extraction often omits it, the DB has no
+  channel column, and library/download rows hardcode `channel: ""`
+  (`rowMarkup` then falls back to "Unknown channel"). Fix = capture the
+  channel at resolve time, store it per track (DB column + migration), serve it
+  in home/search/downloads/queue rows, and backfill (or lazily refresh) rows
+  that already lack it.
+- Downloads filters (follow-up, after the channel fix): group/sort downloaded
+  titles in the Downloads page by duration, alphabetical (A–Z) order, and
+  artist (channel name). Blocked on real channel data above.
 
 ## Constraints / notes
 

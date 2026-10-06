@@ -178,6 +178,15 @@ body.nav-push .content, body.nav-push .player { margin-left: var(--sidenav-w); }
 }
 .sel-clear:hover { background: #3a3a3a; color: #fff; }
 
+#rbRect {
+  position: fixed;
+  z-index: 24;
+  border: 1px solid rgba(29, 185, 84, 0.9);
+  background: rgba(29, 185, 84, 0.15);
+  pointer-events: none;
+}
+#rbRect[hidden] { display: none; }
+
 .thumb { width: 84px; height: 48px; border-radius: 6px; object-fit: cover; background: #000; flex: 0 0 auto; }
 
 .meta { flex: 1 1 auto; min-width: 0; }

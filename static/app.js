@@ -154,6 +154,214 @@ function clearSelection(refocusContainer) {
   if (refocusContainer) resultsList.focus({ preventScroll: true });
 }
 
+// --- Rubber-band drag state (main #results only) ---
+let rbActive = false;
+let rbArmed = false;
+let rbOrigin = { x: 0, y: 0 };
+let rbMode = "plain";
+let rbAdditive = false;
+let rbSnapshot = new Set();
+let rbPrevAnchor = null, rbPrevCaret = null;
+let rbAnchorId = null;
+let rbWasSelected = false;
+let rbLastPointer = { x: 0, y: 0 };
+let rbLastPointerRowId = null;
+let rbLastFocusedId = null;
+let rbScrollTimer = null;
+const RB_THRESHOLD = 4;
+const RB_EDGE = 24;
+const contentEl = document.getElementById("content");
+const rbRectEl = document.getElementById("rbRect");
+
+function rectsOverlap(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function normalizeBand(o, c) {
+  return {
+    left: Math.min(o.x, c.x), top: Math.min(o.y, c.y),
+    right: Math.max(o.x, c.x), bottom: Math.max(o.y, c.y),
+  };
+}
+
+function applyPlain(intersectedIds) { return [...intersectedIds]; }
+
+function applyCtrlToggle(snapshotArr, intersectedArr) {
+  const inter = new Set(intersectedArr);
+  const snap = new Set(snapshotArr);
+  const out = [];
+  for (const id of snapshotArr) if (!inter.has(id)) out.push(id);
+  for (const id of intersectedArr) if (!snap.has(id)) out.push(id);
+  return out;
+}
+
+function applyShiftRange(order, anchorId, pointerId, additive, snapshotArr) {
+  const base = rangeSlice(order, anchorId, pointerId);
+  if (!additive) return base;
+  return unionOrdered(snapshotArr, base);
+}
+
+function intersectedRowIds(band) {
+  const out = [];
+  for (const r of resultsList.querySelectorAll(".row")) {
+    if (rectsOverlap(band, r.getBoundingClientRect())) out.push(r.dataset.id);
+  }
+  return out;
+}
+
+function pointerRowIdAt(x, y, fallbackIds) {
+  const el = document.elementFromPoint(x, y);
+  const row = el ? el.closest(".row") : null;
+  if (row && resultsList.contains(row)) return row.dataset.id;
+  let best = null, bestD = Infinity;
+  for (const r of resultsList.querySelectorAll(".row")) {
+    const b = r.getBoundingClientRect();
+    if (!rectsOverlap(normalizeBand(rbOrigin, { x, y }), b)) continue;
+    const d = Math.abs((b.top + b.bottom) / 2 - y);
+    if (d < bestD) { bestD = d; best = r.dataset.id; }
+  }
+  if (best) return best;
+  if (fallbackIds && fallbackIds.length) return fallbackIds[fallbackIds.length - 1];
+  return rbAnchorId;
+}
+
+function pastThreshold(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y) > RB_THRESHOLD;
+}
+
+function rbMaybeArm(event, row, id) {
+  rbDisarm();
+  if (event.button === 2) return false;
+  if (event.target.closest("button[data-action]")) return false;
+  rbWasSelected = selectionSet.has(id);
+  rbSnapshot = new Set(selectionSet);
+  rbPrevAnchor = selAnchor; rbPrevCaret = selCaret;
+  rbOrigin = { x: event.clientX, y: event.clientY };
+  rbLastPointer = { ...rbOrigin };
+  rbAnchorId = id;
+  rbAdditive = (event.ctrlKey || event.metaKey) && event.shiftKey;
+  rbMode = event.shiftKey ? "shift" : ((event.ctrlKey || event.metaKey) ? "ctrl" : "plain");
+  if (rbMode === "plain" && rbWasSelected) return false;
+  rbArmed = true; rbActive = false;
+  rbLastPointerRowId = id; rbLastFocusedId = null;
+  window.addEventListener("pointermove", rbOnMove);
+  window.addEventListener("pointerup", rbOnUp, { once: true });
+  window.addEventListener("pointercancel", rbOnCancel, { once: true });
+  return true;
+}
+
+function rbOnMove(event) {
+  if (!rbArmed) return;
+  rbLastPointer = { x: event.clientX, y: event.clientY };
+  if (!rbActive) {
+    if (!pastThreshold(rbOrigin, rbLastPointer)) return;
+    rbActive = true;
+  }
+  rbPaintAndApply();
+  rbKickAutoscroll();
+}
+
+function rbPaintAndApply() {
+  const band = normalizeBand(rbOrigin, rbLastPointer);
+  rbRectEl.style.left = band.left + "px";
+  rbRectEl.style.top = band.top + "px";
+  rbRectEl.style.width = Math.max(0, band.right - band.left) + "px";
+  rbRectEl.style.height = Math.max(0, band.bottom - band.top) + "px";
+  rbRectEl.hidden = false;
+  const order = domOrderIds();
+  const hit = intersectedRowIds(band);
+  if (rbMode === "plain") {
+    selectionSet.clear();
+    for (const x of hit) selectionSet.add(x);
+  } else if (rbMode === "ctrl") {
+    const next = applyCtrlToggle([...rbSnapshot], hit);
+    selectionSet.clear();
+    for (const x of next) selectionSet.add(x);
+  } else {
+    const pid = pointerRowIdAt(rbLastPointer.x, rbLastPointer.y, hit);
+    rbLastPointerRowId = pid;
+    const next = applyShiftRange(order, rbAnchorId, pid, rbAdditive, [...rbSnapshot]);
+    selectionSet.clear();
+    for (const x of next) selectionSet.add(x);
+  }
+  const caretId = rbMode === "shift" ? rbLastPointerRowId
+    : (hit.length ? hit[hit.length - 1] : rbAnchorId);
+  selCaret = caretId;
+  selAnchor = rbAnchorId;
+  syncSelectionUI();
+  if (caretId && caretId !== rbLastFocusedId) {
+    rbLastFocusedId = caretId;
+    const el = resultsList.querySelector(`.row[data-id="${CSS.escape(caretId)}"]`);
+    if (el) el.focus({ preventScroll: true });
+  }
+}
+
+function rbOnUp() {
+  window.removeEventListener("pointermove", rbOnMove);
+  window.removeEventListener("pointercancel", rbOnCancel);
+  if (rbArmed && rbActive) {
+    selAnchor = rbAnchorId;
+    if (selCaret == null) selCaret = rbLastPointerRowId ?? rbAnchorId;
+    syncSelectionUI();
+  }
+  rbHide();
+}
+
+function rbOnCancel() {
+  window.removeEventListener("pointermove", rbOnMove);
+  window.removeEventListener("pointerup", rbOnUp);
+  selectionSet.clear();
+  for (const x of rbSnapshot) selectionSet.add(x);
+  selAnchor = rbPrevAnchor; selCaret = rbPrevCaret;
+  syncSelectionUI();
+  rbHide();
+}
+
+function rbHide() {
+  rbArmed = false; rbActive = false;
+  rbRectEl.hidden = true;
+  rbStopAutoscroll();
+}
+
+function rbDisarm() {
+  if (!rbArmed) return;
+  window.removeEventListener("pointermove", rbOnMove);
+  window.removeEventListener("pointerup", rbOnUp);
+  window.removeEventListener("pointercancel", rbOnCancel);
+  rbHide();
+}
+
+function rbKickAutoscroll() {
+  if (rbScrollTimer) return;
+  rbScrollTimer = setInterval(() => {
+    if (!rbArmed || !rbActive) return rbStopAutoscroll();
+    const c = contentEl.getBoundingClientRect();
+    const y = rbLastPointer.y;
+    let dir = 0, dist = Infinity;
+    if (y < c.top + RB_EDGE && y >= c.top - 40) { dir = -1; dist = Math.max(0, y - c.top); }
+    else if (y > c.bottom - RB_EDGE && y <= c.bottom + 40) { dir = 1; dist = Math.max(0, c.bottom - y); }
+    else return;
+    const speed = Math.ceil(14 * (1 - Math.min(1, dist / RB_EDGE))) + 2;
+    contentEl.scrollTop += dir * speed;
+    rbPaintAndApply();
+  }, 16);
+}
+
+function rbStopAutoscroll() {
+  if (rbScrollTimer) { clearInterval(rbScrollTimer); rbScrollTimer = null; }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && rbArmed && rbActive) {
+    e.stopImmediatePropagation();
+    selectionSet.clear();
+    for (const x of rbSnapshot) selectionSet.add(x);
+    selAnchor = rbPrevAnchor; selCaret = rbPrevCaret;
+    syncSelectionUI();
+    rbHide();
+  }
+}, true);
+
 const navState = { push: false, overlay: false };
 function renderNav() {
   document.body.classList.toggle("nav-push", navState.push);
@@ -956,6 +1164,7 @@ resultsList.addEventListener("pointerdown", (event) => {
   if (!row || !resultsList.contains(row)) return;
   const id = row.dataset.id;
   if (!id) return;
+  rbMaybeArm(event, row, id);
   const mod = event.ctrlKey || event.metaKey;
   if (mod && event.shiftKey) selectRangeTo(id, true);
   else if (mod) toggleOne(id);

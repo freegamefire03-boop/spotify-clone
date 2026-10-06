@@ -92,6 +92,7 @@ function useBridge() {
     getLibraryDir: () => api.get_library_dir(),
     setLibraryDir: (p, copy) => api.set_library_dir(p, copy),
     getHome: () => api.get_home(),
+    getDownloads: () => api.get_downloads(),
     getSession: () => api.get_session(),
     saveSession: (queue, qIndex) => api.save_session(queue, qIndex),
     getCookieStatus: () => api.get_cookie_status(),
@@ -262,6 +263,18 @@ function renderResults() {
     updateRowStates();
     return;
   }
+  if (state.mode === "downloads") {
+    resultsList.innerHTML = (state.results.length
+      ? `<h2 class="home-section-title">Downloads</h2>` : "")
+      + state.results.map(rowMarkup).join("");
+    emptyState.hidden = state.results.length > 0;
+    if (!state.results.length)
+      emptyState.querySelector("p").textContent = "No downloads yet — play something to save it.";
+    homeTitle.hidden = true;
+    moreButton.hidden = true;
+    updateRowStates();
+    return;
+  }
   homeTitle.hidden = true;
   resultsList.innerHTML = state.results.map(rowMarkup).join("");
   emptyState.hidden = state.results.length > 0;
@@ -301,6 +314,29 @@ async function loadHome() {
     state.results = [];
     emptyState.hidden = false;
     emptyState.querySelector("p").textContent = "Search for anything to start listening.";
+  }
+  renderResults();
+}
+
+async function loadDownloads() {
+  if (!backend) return;
+  state.mode = "downloads";
+  state.query = "";
+  searchInput.value = "";
+  homeTitle.hidden = true;
+  moreButton.hidden = true;
+  state.results = [];
+  state.total = 0;
+  emptyState.hidden = false;
+  emptyState.querySelector("p").textContent = "Loading downloads...";
+  renderResults();
+  try {
+    const data = await backend.getDownloads();
+    state.results = data.items || [];
+    state.total = data.total ?? state.results.length;
+  } catch (_) {
+    state.results = [];
+    state.total = 0;
   }
   renderResults();
 }
@@ -757,6 +793,7 @@ sidenav.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-nav]");
   if (!btn) return;
   if (btn.dataset.nav === "home") loadHome();
+  if (btn.dataset.nav === "downloads") loadDownloads();
   if (btn.dataset.nav === "queue") { queuePanel.hidden = false; settingsPanel.hidden = true; }
   if (btn.dataset.nav === "settings") openSettings();
   if (navState.overlay) setNav(false, false);

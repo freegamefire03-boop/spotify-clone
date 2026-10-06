@@ -389,6 +389,37 @@ def _recent_home_items(limit: int = 10) -> list[dict[str, Any]]:
     return out
 
 
+def get_downloads() -> dict[str, Any]:
+    """Downloaded tracks only, most recently completed first.
+
+    Excludes memory-only ('memory'), in-flight ('downloading'), and
+    failed/cancelled rows, plus rows whose file is gone from disk.
+    """
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for t in library_db.list_tracks():
+        if t.get("status") != "mp3" or not t.get("file_path"):
+            continue
+        if not Path(t["file_path"]).is_file():
+            continue
+        vid = t.get("video_id") or ""
+        rows.append((
+            # completed_at is "%Y-%m-%dT%H:%M:%S", lexicographically sortable;
+            # fall back to created_at for pre-migration rows missing it.
+            t.get("completed_at") or t.get("created_at") or "",
+            {
+                "id": vid,
+                "title": t.get("title") or "Unknown title",
+                "channel": "",
+                "duration": int(t.get("duration") or 0),
+                "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
+                "file_size": int(t.get("file_size") or 0),
+            },
+        ))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    items = [row for _, row in rows]
+    return {"items": items, "total": len(items)}
+
+
 def get_home() -> dict[str, Any]:
     """Home feed: YouTube recommendations with cookies, else local library.
 
@@ -1463,6 +1494,12 @@ class Api:
             return get_home()
         except Exception:  # noqa: BLE001 - home must never break search/play
             return {"mode": "library", "items": [], "cookies": bool(cookies_path())}
+
+    def get_downloads(self) -> dict[str, Any]:
+        try:
+            return get_downloads()
+        except Exception:  # noqa: BLE001 - downloads must never break search/play
+            return {"items": [], "total": 0}
 
     def _reap_orphan_part(self, video_id: str) -> None:
         """Delete a mid-session orphan .part (the startup sweep is startup-only).

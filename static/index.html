@@ -51,6 +51,16 @@
       <p class="muted">Audio is streamed from YouTube through the local proxy.</p>
     </div>
     <h2 id="homeTitle" class="home-title" hidden></h2>
+    <div id="dlToolbar" class="dl-toolbar" hidden>
+      <span class="dl-toolbar-label">Sort by:</span>
+      <select id="dlSort" aria-label="Sort downloads">
+        <option value="recent">Recently added</option>
+        <option value="title">Title A–Z</option>
+        <option value="artist">Artist A–Z</option>
+        <option value="durAsc">Duration: short first</option>
+        <option value="durDesc">Duration: long first</option>
+      </select>
+    </div>
     <ul class="results" id="results" tabindex="0" aria-label="Results. Arrow keys move, Shift extends, Control Space toggles."></ul>
     <div class="more-wrap">
       <button id="moreButton" class="more-button" hidden>Show more</button>

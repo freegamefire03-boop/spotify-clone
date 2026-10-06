@@ -1020,7 +1020,16 @@ resultsList.addEventListener("keydown", (event) => {
   }
 });
 
-// NOTE: selection lives on pointerdown; click stays button-only so a future dblclick→play hook is trivial.
+// NOTE: selection lives on pointerdown; click stays button-only so the dblclick→play hook below is trivial.
+resultsList.addEventListener("dblclick", (event) => {
+  if (event.target.closest("button[data-action]")) return;
+  const row = event.target.closest(".row");
+  if (!row || !resultsList.contains(row)) return;
+  const track = trackById(row.dataset.id);
+  if (!track) return;
+  if (state.current && state.current.id === track.id) togglePlayback();
+  else playTrack(track);
+});
 resultsList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   const row = event.target.closest(".row");

@@ -124,7 +124,49 @@ the same single channel*. Ideas to evaluate:
 
 ## 8. Round-2 UI work (noted 2026-10-04, pending)
 
-- Queue panel dismiss: close on outside click and on `Esc` (X button already works).
+- Panel exclusivity + dismiss (do first): the queue panel and settings panel
+  must never overlap/coexist — opening one closes the other. The queue panel
+  must close instantly on focus loss, on outside click, and on its close
+  button (X already works; `Esc` should also close it).
+- Home button broken: the sidebar Home item currently does nothing. It must
+  return to the home page, whose content today is recent titles. Recommendations
+  as home content later if possible (note: recommendations already exist when
+  cookies are on — see §6; cookies-off home stays recent titles).
+- Queue "add links" button: a control in the queue panel accepting a pasted
+  batch of links or a single playlist link, adding every resolved track to the
+  queue (backend already resolves playlist links via the search path — reuse it).
+  **Implemented (commit 7bd1867) but UNTESTED.** An isolated logic test of
+  `core.add_links` (stubbed `_fetch_url_items`, no network) failed with a
+  mysterious result: the per-URL dedupe (`seen_urls`, core.py:502-504) did not
+  fire — a duplicated `watch?v=` link in a batch was fetched twice (the recorded
+  call list contained the same URL twice), while the per-id dedupe worked and
+  the returned items were correct. The source on disk contains the dedupe, so
+  the cause is unknown (suspect a stale `__pycache__` or environment quirk).
+  The test was abandoned per user instruction; the feature needs a re-test in
+  a clean interpreter. (One real bug was found and fixed during bring-up: the
+  `submitLinks` element/function name collision in app.js.)
+- Double-click a title plays it (single click only selects; `dblclick` plays
+  the row while keeping the selection from the first click).
+- Responsive Windows-style row selection (expected result: selection feels
+  instant and easy). State model: `selectionSet` + `caret` + `anchor`.
+  Select on `pointerdown` (never on release); `user-select: none` on rows.
+  - Plain click: selection = {clicked}; caret = anchor = clicked.
+  - Ctrl+click: toggle exactly the clicked row, others unchanged;
+    caret = anchor = clicked.
+  - Shift+click: selection = contiguous range anchor→clicked (replaces outside
+    selection); caret = clicked; anchor does NOT move (repeat Shift+clicks
+    re-evaluate from the same anchor, other direction included).
+  - Ctrl+Shift+click: add range anchor→clicked to the existing selection.
+  - Keyboard: arrows move caret (plain = select only it + anchor follows);
+    Shift+arrows extend/shrink anchor→caret; Ctrl+arrows move caret only;
+    Ctrl+Space toggles caret; Ctrl+A selects all.
+- Click-and-drag rubber-band select: past a ~4px movement threshold a drag
+  becomes a selection rectangle (intersected rows selected); plain drag
+  replaces, Ctrl+drag adds/toggles vs the pre-drag snapshot, Shift+drag extends
+  anchor→pointer live. Anchor stays at the drag origin afterwards. Auto-scroll
+  near container edges with speed scaling; scrollbar drags never start a
+  rubber band; a drag starting on an already-selected row is reserved for
+  future reorder/DnD, not selection.
 - Sidebar Downloads section: opens a Downloads page listing all downloaded tracks.
 - Offline mode: disconnect the app completely from the internet, open the Downloads
   page, and skip anything still downloading.
@@ -136,8 +178,9 @@ the same single channel*. Ideas to evaluate:
 
 ## Constraints / notes
 
-- Data budget on the current connection is very limited: no audio streaming
-  tests, no dependency downloads, and no YouTube fetches without asking first.
+- Network posture is wifi-first (no data-budget cap on downloads): still, no live
+  audio streaming tests, dependency downloads, or YouTube fetches without
+  asking first.
 - `/audio/<id>` serves complete cached files from disk with seeking, streams the
   growing MP3 while ffmpeg is writing, answers `503` when the prefix wait
   expires with zero bytes, and can fall back to YouTube when no title/URL is

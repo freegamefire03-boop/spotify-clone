@@ -106,6 +106,14 @@ def _worker_count() -> int:
         return 3
 
 
+def is_offline() -> bool:
+    """True when the persisted offline_mode setting is on."""
+    try:
+        return bool(settings.get("offline_mode"))
+    except Exception:
+        return False
+
+
 # Long-lived encode lanes (1 foreground + rest background) start here at
 # import time, before the window opens. Daemon threads: never block exit.
 download_manager = downloader.DownloadManager(
@@ -428,7 +436,7 @@ def get_home() -> dict[str, Any]:
     """
     has_cookies = bool(cookies_path())
     now = time.time()
-    if has_cookies:
+    if has_cookies and not is_offline():
         with _home_lock:
             cached = _home_cache.get("rec")
             if cached and now - cached[0] < HOME_TTL:
@@ -484,6 +492,43 @@ def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
     query = (query or "").strip()
     if not query:
         return {"items": [], "total": 0, "offset": 0, "query": query, "cookies": bool(cookies_path())}
+
+    if is_offline():
+        needle = query.lower()
+        try:
+            rows = library_db.list_tracks()
+        except Exception:
+            rows = []
+        matches: list[dict[str, Any]] = []
+        for t in rows:
+            if t.get("status") != "mp3" or not t.get("file_path"):
+                continue
+            try:
+                if not Path(t["file_path"]).is_file():
+                    continue
+            except OSError:
+                continue
+            title = t.get("title") or ""
+            if needle not in title.lower():
+                continue
+            vid = t.get("video_id") or ""
+            matches.append({
+                "id": vid,
+                "title": title or "Unknown title",
+                "channel": "",
+                "duration": int(t.get("duration") or 0),
+                "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg" if vid else "",
+            })
+        start = max(0, min(int(offset), len(matches)))
+        size = max(1, min(int(limit), SEARCH_POOL))
+        return {
+            "items": matches[start:start + size],
+            "total": len(matches),
+            "offset": start,
+            "query": query,
+            "cookies": bool(cookies_path()),
+            "offline": True,
+        }
 
     key = query.lower()
     now = time.time()
@@ -916,6 +961,11 @@ def _audio_response(start_response: Callable, video_id: str, range_header: Optio
         if existing.is_file():
             return _serve_file(start_response, existing, range_header)
 
+    if is_offline():
+        # Offline: disk file or nothing. Skip memory re-download,
+        # growing-partial serve, and the YouTube proxy fallback.
+        return _unavailable(start_response, video_id)
+
     # 2. Memory mode: serve from in-memory buffer
     if download_manager.is_memory(video_id):
         if download_manager.is_active(video_id):
@@ -941,6 +991,8 @@ def _audio_response(start_response: Callable, video_id: str, range_header: Optio
 def _ensure_downloading(video_id: str, track: Optional[dict[str, Any]],
                         priority: int = downloader.FG_PRIORITY) -> Optional[Path]:
     """Return the partial file path, starting/resuming the download if needed."""
+    if is_offline():
+        return None
     if track is None:
         return None
     if download_manager.is_active(video_id):
@@ -1305,6 +1357,7 @@ class Api:
             "cookies_path": str(COOKIES_FILE),
             "bitrate": _current_bitrate(),
             "lanes": download_manager.lane_status(),
+            "offline_mode": is_offline(),
         }
 
     def prepare_track(self, video_id: str) -> dict[str, Any]:
@@ -1339,6 +1392,7 @@ class Api:
         return {
             "memory_mode": bool(settings.get("memory_mode")),
             "queue_depth": int(settings.get("queue_depth") or 0),
+            "offline_mode": is_offline(),
         }
 
     def set_memory_mode(self, value: bool) -> dict[str, Any]:
@@ -1349,6 +1403,11 @@ class Api:
         depth = max(0, min(10, int(value)))
         settings.set("queue_depth", depth)
         return {"ok": True, "queue_depth": depth}
+
+    def set_offline_mode(self, value: Any) -> dict[str, Any]:
+        flag = bool(value)
+        settings.set("offline_mode", flag)
+        return {"ok": True, "offline_mode": flag}
 
     def get_session(self) -> dict[str, Any]:
         try:
@@ -1545,6 +1604,25 @@ class Api:
         if lane != downloader.BG_PRIORITY:
             lane = downloader.FG_PRIORITY
         warming = bool(prefetch_only)
+        if is_offline():
+            try:
+                existing_track = library_db.get_track(video_id)
+            except Exception:
+                existing_track = None
+            if (existing_track and existing_track.get("status") == "mp3"
+                    and existing_track.get("file_path")):
+                try:
+                    existing = Path(existing_track["file_path"])
+                    if existing.is_file() and existing.stat().st_size > 0:
+                        if not warming:
+                            try:
+                                library_db.record_play(video_id)
+                            except Exception:  # noqa: BLE001 - history must never break playback
+                                pass
+                        return {"status": "mp3", "path": str(existing)}
+                except OSError:
+                    pass
+            return {"ok": False, "skipped": True, "reason": "not-downloaded", "offline": True}
         # Skip path: cancel the previously-playing download so it stops
         # fetching and frees the foreground lane. Prefetch ids are never
         # cancelled (guarded below); completed files are left alone.

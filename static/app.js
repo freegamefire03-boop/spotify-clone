@@ -35,6 +35,7 @@ const settingsButton = document.getElementById("settingsButton");
 const settingsPanel = document.getElementById("settingsPanel");
 const closeSettings = document.getElementById("closeSettings");
 const memoryMode = document.getElementById("memoryMode");
+const offlineMode = document.getElementById("offlineMode");
 const queueDepth = document.getElementById("queueDepth");
 const libraryDir = document.getElementById("libraryDir");
 const changeFolder = document.getElementById("changeFolder");
@@ -86,6 +87,7 @@ function useBridge() {
     getSettings: () => api.get_settings(),
     setMemoryMode: (val) => api.set_memory_mode(val),
     setQueueDepth: (val) => api.set_queue_depth(val),
+    setOfflineMode: (val) => api.set_offline_mode(val),
     reportPlayhead: (id, s) => api.report_playhead(id, s),
     pauseDownload: (id) => api.pause_download(id),
     resumeDownload: (id) => api.resume_download(id),
@@ -159,6 +161,7 @@ function refreshStatus() {
     .status()
     .then((data) => {
       setCookieStatus(!!data.cookies);
+      if (data.offline_mode) cookieStatus.textContent += " · offline";
       initBitrate(data);
     })
     .catch(() => setCookieStatus(false));
@@ -183,6 +186,7 @@ function openSettings() {
   settingsPanel.hidden = false;
   backend.getSettings().then((s) => {
     memoryMode.checked = !!s.memory_mode;
+    offlineMode.checked = !!s.offline_mode;
     queueDepth.value = Number(s.queue_depth ?? 3) || 0;
   }).catch(() => {});
   backend.getLibraryDir().then((d) => {
@@ -416,7 +420,53 @@ function updateNowPlaying() {
   npChannel.textContent = state.current.channel || "";
 }
 
-async function playTrack(track) {
+async function getCompleteIds() {
+  try {
+    const data = await backend.getDownloads();
+    return new Set((data.items || []).map((t) => t.id));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function showNothingDownloaded() {
+  state.current = null;
+  audio.removeAttribute("src");
+  audio.load();
+  npTitle.textContent = "Nothing downloaded";
+  npChannel.textContent = "Offline mode — play a downloaded track";
+  updateTransportState();
+  updateRowStates();
+}
+
+async function playNextComplete(seen = new Set()) {
+  const complete = await getCompleteIds();
+  while (state.qIndex + 1 < state.queue.length) {
+    state.qIndex += 1;
+    const next = state.queue[state.qIndex];
+    if (seen.has(next.id)) continue;
+    seen.add(next.id);
+    if (!complete.has(next.id)) continue;
+    return playTrack(next, seen);
+  }
+  showNothingDownloaded();
+  return false;
+}
+
+async function playPrevComplete(seen = new Set()) {
+  const complete = await getCompleteIds();
+  while (state.qIndex - 1 >= 0) {
+    state.qIndex -= 1;
+    const prev = state.queue[state.qIndex];
+    if (seen.has(prev.id)) continue;
+    seen.add(prev.id);
+    if (!complete.has(prev.id)) continue;
+    return playTrack(prev, seen);
+  }
+  return false;
+}
+
+async function playTrack(track, _skipSeen = new Set()) {
   state.errorRetried = false;
   const prevId = state.current && state.current.id !== track.id ? state.current.id : null;
   state.current = track;
@@ -448,7 +498,14 @@ async function playTrack(track) {
     const upcoming = state.queue
       .slice(state.qIndex + 1, state.qIndex + 1 + 5)
       .map((t) => ({ id: t.id, title: t.title, url: `https://www.youtube.com/watch?v=${t.id}` }));
-    backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, upcoming, prevId).catch(() => {});
+    let playRes = null;
+    try {
+      playRes = await backend.play(track.id, track.title, `https://www.youtube.com/watch?v=${track.id}`, upcoming, prevId);
+    } catch (_) { playRes = null; }
+    if (playRes && playRes.skipped) {
+      _skipSeen.add(track.id);
+      return playNextComplete(_skipSeen);
+    }
   }
 
   // Wait until the server can serve a valid MP3 prefix before assigning src.
@@ -679,10 +736,10 @@ async function restoreSession() {
   } catch (_) {}
 }
 
-function playNext() {
+function playNext(_skipSeen = new Set()) {
   if (state.qIndex + 1 < state.queue.length) {
     state.qIndex += 1;
-    return playTrack(state.queue[state.qIndex]);
+    return playTrack(state.queue[state.qIndex], _skipSeen);
   }
   return false;
 }
@@ -691,6 +748,9 @@ function playPrev() {
   if (audio.currentTime > 3) {
     audio.currentTime = 0;
     return true;
+  }
+  if (offlineMode && offlineMode.checked) {
+    return playPrevComplete();
   }
   if (state.qIndex > 0) {
     state.qIndex -= 1;
@@ -900,6 +960,16 @@ closeSettings.addEventListener("click", closeSettingsPanel);
 
 memoryMode.addEventListener("change", () => {
   backend.setMemoryMode(memoryMode.checked);
+});
+
+offlineMode.addEventListener("change", async () => {
+  try {
+    await backend.setOfflineMode(offlineMode.checked);
+  } catch (_) {}
+  refreshStatus();
+  if (offlineMode.checked) {
+    loadDownloads();
+  }
 });
 
 queueDepth.addEventListener("change", () => {

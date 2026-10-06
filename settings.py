@@ -17,6 +17,7 @@ DEFAULTS: dict[str, Any] = {
     "download_workers": 3,   # total encode lanes: 1 foreground + rest background
     "session_queue": [],     # last session's queue items (id/title/channel/duration/thumbnail)
     "session_qindex": -1,    # index of current track in session_queue
+    "offline_mode": False,   # zero network, local library only
 }
 
 

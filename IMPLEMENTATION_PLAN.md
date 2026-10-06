@@ -14,7 +14,7 @@ recorded in a local DB, and served from disk on subsequent plays (offline-capabl
 |---|---|---|
 | A | MP3 production | **Implemented as direct streaming transcode.** yt-dlp resolves the direct audio URL; one ffmpeg process encodes straight to a growing MP3. This supersedes the older two-stage m4a-then-transcode plan. |
 | B | Growing-file playback | **Implemented (instant-start rework 2026-10-04).** `/audio/<id>` sends no `Content-Length` while the MP3 grows, uses `Accept-Ranges: none`, waits for a valid MP3 prefix (ID3v2-aware sync-word detection, 4KB minimum) plus an adaptive ~300ms-audio burst calibrated from measured ffmpeg throughput, then streams from disk as ffmpeg writes. The manual startup-buffer setting was removed. |
-| B2 | Seek beyond the written edge | **Not implemented.** Seeks are refused for growing audio for now; the deferred design is in `to-do.md` item 5. |
+| B2 | Seek beyond the written edge | **Implemented 2026-10-06.** Growing stream answers `Accept-Ranges: bytes`; seeks past the edge hold the Range open (30 s budget) then serve `206 bytes N-/*` on the same channel, else `416`. Details in `to-do.md` item 5. |
 | B3 | Avoid duplicate downloads | **Partially implemented.** An active download is registered before the slow URL resolve and reused by concurrent requests. Byte-level resume after a failed/interrupted encode is not implemented. |
 | B4 | 10s-ahead model | **Implemented, then removed.** Playhead-aware throttling shipped, then wedged the single FG lane on stalls — deleted by the playback-lane fix. Downloads are now uncapped with a stall watchdog (10 s no-new-bytes, 30 s first-byte grace, pause-exempt) + ffmpeg `-rw_timeout`. |
 | B5 | Encode lanes | **Implemented.** 1 FG + 2 BG persistent worker threads pull `AudioJob`s (priority-routed); ffmpeg stays per-track. Generation tokens drop stale jobs and stop superseded workers poisoning state. |
@@ -154,7 +154,8 @@ Operations: `INSERT` (add), `SELECT WHERE video_id=?` (lookup → offline check)
 - **Phase 2–4 complete** (with pivots): pacing built then removed in favor of uncapped + watchdog; `continue_current` retired; prefetch gated only on `queue_depth`; settings panel, folder flow, cookie UI all shipped.
 - **v1 extras complete**: home view, watch history, sidebar, session restore, search focus.
 - **Playback-lane fix (committed, documented in CHANGELOG):** 10s pacing deleted (wedged the FG lane), stall watchdog + `-rw_timeout` + bounded resolve + generation tokens, hover moved to BG lane, zero-byte serves answer `503`, file logging to `spotify-clone.log`, lane depths in diagnostics.
-- **Still pending:** explicit zero-network offline-replay confirmation, deferred seek design (to-do §5), round-2 UI items (to-do §8: queue dismiss, Downloads page, offline mode, progress-bar suppression).
+- **2026-10-06 (mass-implementation loop):** all §8 round-2 items done (panel exclusivity + dismiss, Home fix, progress-bar suppression, queue add-links **[untested — dedupe re-test needed]**, Downloads page, offline mode, settings-modal swap) and the §5 seek design implemented (hold-open + 416).
+- **Still pending:** explicit zero-network offline-replay confirmation in the live app, queue add-links dedupe re-test in a clean interpreter, and GUI confirmation of the 2026-10-06 items while running.
 - **Data constraint**: no audio downloads without asking first. Note: current tree downloads uncapped (full track + up to 3 prefetches per play) — watch data usage on limited connections.
 
 ## Phase 1 architecture (as built)

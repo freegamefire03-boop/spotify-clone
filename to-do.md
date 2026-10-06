@@ -1,10 +1,11 @@
 # TO-DO — mixed implemented and pending features
 
-> Status snapshot: 2026-10-04 (docs updated post-implementation).
+> Status snapshot: 2026-10-06 (mass-implementation loop: §5 + all §8 items done).
 >
 > - **Implemented:** persistent-library core, direct-to-MP3 downloading, offline replay from disk, instant-start playback (valid-frame gate + adaptive burst + `prepare_track` + hover prefetch; manual pre-buffer removed), hidden ffmpeg process, playback readiness/retry behavior, friendly network errors, YouTube URL search, search focus + `Ctrl+L`, MP3-quality switch (128/192/320), download-progress display, settings panel (memory mode, prefetch depth, download folder, cookies, session), memory-mode backend, queue prefetch, long-lived encode lanes (1 FG + 2 BG), orphan `.part` cleanup, skip/interrupt handling (cancel + delete, no resume), download-folder change flow + copy prompt, conditional home view, YouTube-style sidebar, watch history + home sections, session restore, cookie management UI.
+> - **Implemented 2026-10-06:** seek-beyond-edge hold-open (§5), panel exclusivity + dismiss, Home-button fix, progress-bar suppression on cache hits, queue add-links (**untested**, see §8), Downloads page, offline mode, settings-modal swap (preview polished: retired Continue toggle replaced by Offline mode, stepper fixed to 0–10, all settings wired, live mini-player).
 > - **Implemented then superseded:** 10s-ahead pacing and pause-securing-10s were built, then removed by the playback-lane fix — downloads are now uncapped with a stall watchdog (see §1). `continue_current` setting retired.
-> - **Still pending:** seeking into not-yet-downloaded bytes (§5, deferred) and the round-2 UI items in §8.
+> - **Still pending:** re-test of queue add-links dedupe in a clean interpreter (see §8); live/GUI confirmation of the 2026-10-06 items in the running app.
 
 ## 1. Playback-aware downloading
 
@@ -75,22 +76,24 @@ fix. Current behaviour is uncapped (wifi-first) downloading.**
 - Audios already in local storage are still fetched from storage — this option
   only stops *saving new ones*.
 
-## 5. Seeking beyond the downloaded portion (deferred)
+## 5. Seeking beyond the downloaded portion
 
-**Status: deferred and still pending.**
+**Status: implemented 2026-10-06 (approach 1: hold the Range request open).**
 
-**Current behaviour:** a seek past the written edge is **rejected and snaps
-back**. Chromium is told the stream is not range-seekable while the file is
-still growing, so the scrubber cannot drag into unwritten bytes.
+**Current behaviour:** the growing stream answers `Accept-Ranges: bytes`
+(no `Content-Length`), so the scrubber can drag into unwritten bytes. A seek
+past the written edge (`Range: bytes=N-`, N > 0) is held open while the
+download continues in the same single channel: the request waits (fresh 30 s
+budget, polled every 50 ms) for the encoder to write past N, then serves
+`206` with `Content-Range: bytes N-/*` and streams from N to the growth edge.
+Timeout, paused (frozen edge), or dead download answers `416` (`bytes */*`).
+Initial loads (no Range, `bytes=0-`, suffix/invalid ranges) take the byte-
+identical 200 flow. Prefix-wait 503s, adaptive burst, and the stall watchdog
+are unchanged; complete files still use exact-total 206s (`_serve_file`).
 
-**Wanted eventually:** serve the seeked part *while the download continues in
-the same single channel*. Ideas to evaluate:
-
-- Hold the Range request open and wait for the encoder to write those bytes
-  (bounded timeout, then `416`). Feels frozen but is seamless.
-- Re-position the ffmpeg process (`-ss`) and continue encoding from there.
-- Once the file is complete, allow full Range seeking (already works today on
-  replay from disk).
+**Not done:** re-positioning ffmpeg (`-ss`) — rejected in favor of hold-open
+(single channel, no re-encode). Memory-mode growing seeks stay non-seekable
+(default-off edge case, separate buffer machinery).
 
 ---
 
@@ -122,7 +125,7 @@ the same single channel*. Ideas to evaluate:
 - Session restore: queue + index persist debounced to `settings.json`; restore is paused (no autoplay, no download) with cold-start play on first gesture.
 - Search focus: search box focused on first open; `Ctrl+L` refocuses; `Esc` clears search and restores home.
 
-## 8. Round-2 UI work (noted 2026-10-04, pending)
+## 8. Round-2 UI work (noted 2026-10-04, implemented 2026-10-06)
 
 - Panel exclusivity + dismiss (do first): the queue panel and settings panel
   must never overlap/coexist — opening one closes the other. The queue panel

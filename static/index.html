@@ -77,39 +77,134 @@
     <ul id="queueList"></ul>
   </aside>
 
-  <div class="settings-panel" id="settingsPanel" hidden>
-    <div class="settings-head">
-      <span>Settings</span>
-      <button id="closeSettings" class="icon-button" title="Close settings" aria-label="Close settings">&times;</button>
+  <div id="settingsBackdrop" hidden>
+    <div class="modal" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings and Preferences">
+      <div class="modal-header">
+        <div class="modal-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+        <span class="modal-icon-label">settings</span>
+        <div style="flex:1"></div>
+        <button class="modal-close" id="settingsX" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div class="mini-player">
+        <div class="mini-note">♪</div>
+        <div class="mini-track">
+          <div class="t" id="mMiniTitle">Nothing playing</div>
+          <div class="a"><span id="mMiniArtist">Pick a track</span> · <span id="mMiniState">Paused</span></div>
+        </div>
+        <div class="mini-controls">
+          <button class="mini-btn" id="mMiniPrev" title="Previous">⏮</button>
+          <button class="mini-play" id="mMiniPlay" title="Play/Pause">▶</button>
+          <button class="mini-btn" id="mMiniNext" title="Next">⏭</button>
+          <span class="mini-time" id="mMiniCur">0:00</span>
+          <div class="mini-scrub" id="mMiniScrub"><div id="mMiniFill"></div></div>
+          <span class="mini-time dur" id="mMiniDur">0:00</span>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="general" role="tab">General &amp; Playback</button>
+          <button class="tab" data-tab="storage" role="tab">Storage &amp; Downloads</button>
+          <button class="tab" data-tab="cookies" role="tab">Cookies &amp; Network</button>
+        </div>
+        <div class="panel">
+          <div class="panel-page" data-page="general">
+            <h2>Playback &amp; Memory</h2>
+            <p class="sub">Configure how songs are cached and queued in memory.</p>
+            <div class="cards">
+              <div class="card">
+                <div class="card-text"><h3>Memory mode</h3><p>Keep loaded tracks in RAM for instant re-play.</p></div>
+                <button class="check" id="mMemoryCheck" data-check aria-checked="false" title="Toggle memory mode"></button>
+              </div>
+              <div class="card">
+                <div class="card-text"><h3>Offline mode</h3><p>Play only downloaded tracks; new searches are disabled.</p></div>
+                <button class="check" id="mOfflineCheck" data-check aria-checked="false" title="Toggle offline mode"></button>
+              </div>
+              <div class="card full">
+                <div class="card-text"><h3>Queue depth limit</h3><p>Maximum upcoming tracks pre-buffered ahead of time (0–10).</p></div>
+                <div class="num-wrap">
+                  <div class="stepper">
+                    <button type="button" class="step-btn" id="mQMinus" aria-label="Decrease depth limit">−</button>
+                    <input type="number" id="mQueueDepth" min="0" max="10" step="1" value="3" />
+                    <button type="button" class="step-btn" id="mQPlus" aria-label="Increase depth limit">+</button>
+                  </div>
+                  <span>tracks</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="panel-page" data-page="storage" hidden>
+            <h2>Storage &amp; Downloads</h2>
+            <p class="sub">Where finished MP3s are saved on disk.</p>
+            <div class="card full">
+              <div style="flex:1;min-width:0"><h3>Download folder</h3><p>New downloads go here. Changing it asks whether to copy existing files.</p>
+                <div class="field-row">
+                  <input type="text" id="mFolderPath" spellcheck="false" />
+                  <button class="btn" id="mChangeFolder">Change...</button>
+                </div>
+                <div class="hint" id="mFolderError" hidden></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel-page ck-page" data-page="cookies" hidden>
+            <header class="ck-head">
+              <div class="ck-head-top">
+                <h2 class="ck-title">
+                  <svg class="ck-lock" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                  Cookies &amp; Network
+                </h2>
+                <div class="ck-pill" id="mCookiePill">
+                  <span class="ck-ping"><span></span><span class="ck-dot"></span></span>
+                  <span id="mCookieState">checking…</span>
+                  <span class="ck-sep">•</span>
+                  <span class="ck-dim" id="mCookieSize"></span>
+                </div>
+                <button class="guide-btn" id="mGuideBtn" title="How to extract your cookies" aria-label="Cookie extraction guide">?</button>
+              </div>
+              <p class="ck-desc">Paste a <code>cookies.txt</code> export in Netscape format to unlock age-restricted or login-gated tracks.</p>
+            </header>
+            <div class="ck-field-labels">
+              <label for="mCookieText">Netscape Cookie Format</label>
+              <span>UTF-8 Plaintext</span>
+            </div>
+            <textarea class="cookies" id="mCookieText" rows="7" spellcheck="false" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	0	LOGIN_INFO	..."></textarea>
+            <div class="hint" id="mCookieError" hidden></div>
+            <footer class="ck-footer">
+              <div class="cookie-actions">
+                <button class="btn primary" id="mSaveCookies">Save cookies</button>
+                <button class="btn danger-ghost" id="mClearCookies">Clear</button>
+              </div>
+              <span class="hint">Overwrites ask for confirmation.</span>
+            </footer>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span class="dot"></span><span class="hint-text">Settings apply immediately · <kbd>Esc</kbd> to close</span>
+        <button class="footer-close" id="mFooterClose">Close</button>
+      </div>
     </div>
-    <div class="setting-row">
-      <label for="memoryMode">Memory mode</label>
-      <input type="checkbox" id="memoryMode" />
+  </div>
+  <div id="settingsGuideBackdrop" hidden>
+    <div class="guide-card" role="dialog" aria-modal="true" aria-label="Cookie extraction guide">
+      <div class="guide-head">
+        <div><h3>How to get your cookies.txt</h3><p>3 steps — export cookies from your browser while logged into YouTube.</p></div>
+        <button class="modal-close" id="mGuideClose" title="Close" aria-label="Close guide">✕</button>
+      </div>
+      <ol class="guide-steps">
+        <li><span class="step-n">1</span><div><b>Open YouTube &amp; log in</b><p>Use the same browser you normally watch YouTube with, while you're signed in.</p></div></li>
+        <li><span class="step-n">2</span><div><b>Open DevTools console</b><p>Press <kbd>F12</kbd> → <em>Console</em> tab (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>J</kbd>).</p></div></li>
+        <li><span class="step-n">3</span><div><b>Paste this snippet &amp; press Enter</b><p>It copies your cookies as <code>cookies.txt</code> to your clipboard.</p>
+          <div class="guide-code"><pre id="mCookieSnippet">copy([...document.cookie.split('; ').map(c =&gt; {
+  const [n, ...v] = c.split('=');
+  return ['.youtube.com','TRUE','/','FALSE','0', n, v.join('=')].join('\t');
+})].join('\n'))</pre><button class="btn primary" id="mCopySnippet">Copy snippet</button></div></div></li>
+      </ol>
+      <p class="hint">Tip: paste the copied text into the box, then hit <b>Save cookies</b>. HttpOnly login cookies may require the "Get cookies.txt" browser extension instead.</p>
     </div>
-    <div class="setting-row">
-      <label for="offlineMode">Offline mode</label>
-      <input type="checkbox" id="offlineMode" />
-    </div>
-    <div class="setting-row">
-      <label for="queueDepth">Queue depth</label>
-      <input type="number" id="queueDepth" min="0" max="10" step="1" value="3" />
-    </div>
-    <div class="setting-row setting-folder">
-      <label for="libraryDir">Download folder</label>
-      <input type="text" id="libraryDir" spellcheck="false" />
-      <button id="changeFolder" class="text-button">Change...</button>
-    </div>
-    <div class="setting-error" id="folderError" hidden></div>
-    <div class="setting-row">
-      <label>Cookies</label>
-      <span id="cookieDetail" class="muted">checking...</span>
-    </div>
-    <textarea id="cookieText" rows="4" maxlength="1000000" placeholder="Paste Netscape cookies.txt content..."></textarea>
-    <div class="setting-row">
-      <button id="saveCookies" class="text-button">Save cookies</button>
-      <button id="removeCookies" class="text-button">Remove</button>
-    </div>
-    <div class="setting-error" id="cookieError" hidden></div>
+  </div>
+  <div id="mToast" hidden>
+    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+    <span id="mToastMsg">Action recorded</span>
   </div>
 
   <footer class="player" id="player">

@@ -32,19 +32,43 @@ const linksStatus = document.getElementById("linksStatus");
 const homeTitle = document.getElementById("homeTitle");
 const bitrateBtns = document.querySelectorAll(".bitrate-btn");
 const settingsButton = document.getElementById("settingsButton");
-const settingsPanel = document.getElementById("settingsPanel");
-const closeSettings = document.getElementById("closeSettings");
-const memoryMode = document.getElementById("memoryMode");
-const offlineMode = document.getElementById("offlineMode");
-const queueDepth = document.getElementById("queueDepth");
-const libraryDir = document.getElementById("libraryDir");
-const changeFolder = document.getElementById("changeFolder");
-const folderError = document.getElementById("folderError");
-const cookieDetail = document.getElementById("cookieDetail");
-const cookieText = document.getElementById("cookieText");
-const saveCookies = document.getElementById("saveCookies");
-const removeCookies = document.getElementById("removeCookies");
-const cookieError = document.getElementById("cookieError");
+const settingsBackdrop = document.getElementById("settingsBackdrop");
+const settingsModal = document.getElementById("settingsModal");
+const settingsX = document.getElementById("settingsX");
+const mFooterClose = document.getElementById("mFooterClose");
+const mMemoryCheck = document.getElementById("mMemoryCheck");
+const mOfflineCheck = document.getElementById("mOfflineCheck");
+const mQueueDepth = document.getElementById("mQueueDepth");
+const mQMinus = document.getElementById("mQMinus");
+const mQPlus = document.getElementById("mQPlus");
+const mFolderPath = document.getElementById("mFolderPath");
+const mChangeFolder = document.getElementById("mChangeFolder");
+const mFolderError = document.getElementById("mFolderError");
+const mCookiePill = document.getElementById("mCookiePill");
+const mCookieState = document.getElementById("mCookieState");
+const mCookieSize = document.getElementById("mCookieSize");
+const mGuideBtn = document.getElementById("mGuideBtn");
+const settingsGuideBackdrop = document.getElementById("settingsGuideBackdrop");
+const mGuideClose = document.getElementById("mGuideClose");
+const mCopySnippet = document.getElementById("mCopySnippet");
+const mCookieSnippet = document.getElementById("mCookieSnippet");
+const mCookieText = document.getElementById("mCookieText");
+const mSaveCookies = document.getElementById("mSaveCookies");
+const mClearCookies = document.getElementById("mClearCookies");
+const mCookieError = document.getElementById("mCookieError");
+const mToast = document.getElementById("mToast");
+const mToastMsg = document.getElementById("mToastMsg");
+const mMiniTitle = document.getElementById("mMiniTitle");
+const mMiniArtist = document.getElementById("mMiniArtist");
+const mMiniState = document.getElementById("mMiniState");
+const mMiniPlay = document.getElementById("mMiniPlay");
+const mMiniPrev = document.getElementById("mMiniPrev");
+const mMiniNext = document.getElementById("mMiniNext");
+const mMiniCur = document.getElementById("mMiniCur");
+const mMiniDur = document.getElementById("mMiniDur");
+const mMiniScrub = document.getElementById("mMiniScrub");
+const mMiniFill = document.getElementById("mMiniFill");
+const modalSettings = { memory_mode: false, offline_mode: false, queue_depth: 3 };
 const menuButton = document.getElementById("menuButton");
 const sidenav = document.getElementById("sidenav");
 const edgeZone = document.getElementById("edgeZone");
@@ -181,32 +205,89 @@ bitrateBtns.forEach(btn => {
   });
 });
 
-function openSettings() {
-  queuePanel.hidden = true;
-  settingsPanel.hidden = false;
-  backend.getSettings().then((s) => {
-    memoryMode.checked = !!s.memory_mode;
-    offlineMode.checked = !!s.offline_mode;
-    queueDepth.value = Number(s.queue_depth ?? 3) || 0;
-  }).catch(() => {});
-  backend.getLibraryDir().then((d) => {
-    if (d && d.path) libraryDir.value = d.path;
-  }).catch(() => {});
-  cookieError.hidden = true;
-  cookieText.value = "";
-  backend.getCookieStatus().then((c) => {
+let mToastTimer = null;
+function showMToast(msg) {
+  mToastMsg.textContent = msg;
+  mToast.hidden = false;
+  requestAnimationFrame(() => mToast.classList.add("show"));
+  clearTimeout(mToastTimer);
+  mToastTimer = setTimeout(() => {
+    mToast.classList.remove("show");
+    setTimeout(() => { mToast.hidden = true; }, 300);
+  }, 2500);
+}
+
+function setCheck(btn, on) {
+  btn.setAttribute("aria-checked", String(!!on));
+  btn.textContent = on ? "✔" : "";
+}
+
+function refreshCookiePill() {
+  if (!backend) return Promise.resolve();
+  return backend.getCookieStatus().then((c) => {
     if (c && c.present) {
       const kb = (Number(c.size) / 1024).toFixed(1);
       const when = c.mtime ? new Date(c.mtime * 1000).toLocaleDateString() : "";
-      cookieDetail.textContent = `present · ${kb} KB${when ? " · " + when : ""}`;
+      mCookieState.textContent = "cookies on";
+      mCookieSize.textContent = `${kb} KB${when ? " · " + when : ""}`;
+      mCookiePill.classList.remove("off");
     } else {
-      cookieDetail.textContent = "missing";
+      mCookieState.textContent = "cookies off";
+      mCookieSize.textContent = "missing";
+      mCookiePill.classList.add("off");
     }
-  }).catch(() => { cookieDetail.textContent = "missing"; });
+  }).catch(() => {
+    mCookieState.textContent = "cookies off";
+    mCookieSize.textContent = "missing";
+    mCookiePill.classList.add("off");
+  });
+}
+
+function syncMiniPlayer() {
+  if (!state.current) {
+    mMiniTitle.textContent = "Nothing playing";
+    mMiniArtist.textContent = "Pick a track";
+  } else {
+    mMiniTitle.textContent = state.current.title || "Unknown";
+    mMiniArtist.textContent = state.current.channel || "";
+  }
+  const playing = !audio.paused && !audio.ended && !!state.current;
+  mMiniPlay.textContent = playing ? "❚❚" : "▶";
+  mMiniState.textContent = playing ? "Playing" : "Paused";
+  const cur = Number(audio.currentTime) || 0;
+  const total = Number.isFinite(audio.duration) && audio.duration > 0
+    ? audio.duration : (Number(state.current && state.current.duration) || 0);
+  mMiniCur.textContent = formatTime(cur);
+  mMiniDur.textContent = formatTime(total);
+  mMiniFill.style.width = total > 0 ? Math.min(100, (cur / total) * 100) + "%" : "0%";
+}
+
+function openSettings() {
+  queuePanel.hidden = true;
+  settingsBackdrop.hidden = false;
+  if (!backend) return;
+  backend.getSettings().then((s) => {
+    modalSettings.memory_mode = !!s.memory_mode;
+    modalSettings.offline_mode = !!s.offline_mode;
+    modalSettings.queue_depth = Math.max(0, Math.min(10, Math.floor(Number(s.queue_depth ?? 3) || 0)));
+    setCheck(mMemoryCheck, modalSettings.memory_mode);
+    setCheck(mOfflineCheck, modalSettings.offline_mode);
+    mQueueDepth.value = modalSettings.queue_depth;
+  }).catch(() => {});
+  backend.getLibraryDir().then((d) => { if (d && d.path) mFolderPath.value = d.path; }).catch(() => {});
+  mFolderError.hidden = true;
+  mCookieError.hidden = true;
+  mCookieText.value = "";
+  refreshCookiePill();
+  syncMiniPlayer();
 }
 
 function closeSettingsPanel() {
-  settingsPanel.hidden = true;
+  settingsBackdrop.hidden = true;
+}
+
+function closeSettingsGuide() {
+  settingsGuideBackdrop.hidden = true;
 }
 
 function closeQueuePanel() {
@@ -414,10 +495,12 @@ function updateNowPlaying() {
   if (!state.current) {
     npTitle.textContent = "Nothing playing";
     npChannel.textContent = "Pick a track with the play button";
+    syncMiniPlayer();
     return;
   }
   npTitle.textContent = state.current.title;
   npChannel.textContent = state.current.channel || "";
+  syncMiniPlayer();
 }
 
 async function getCompleteIds() {
@@ -749,7 +832,7 @@ function playPrev() {
     audio.currentTime = 0;
     return true;
   }
-  if (offlineMode && offlineMode.checked) {
+  if (modalSettings.offline_mode) {
     return playPrevComplete();
   }
   if (state.qIndex > 0) {
@@ -825,6 +908,8 @@ searchInput.addEventListener("input", () => {
 
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (!settingsGuideBackdrop.hidden) { closeSettingsGuide(); event.preventDefault(); return; }
+    if (!settingsBackdrop.hidden) { closeSettingsPanel(); event.preventDefault(); return; }
     if (!queuePanel.hidden) return;
     searchInput.value = "";
     loadHome();
@@ -838,7 +923,7 @@ prevButton.addEventListener("click", () => playPrev());
 nextButton.addEventListener("click", () => playNext());
 queueButton.addEventListener("click", () => {
   queuePanel.hidden = !queuePanel.hidden;
-  if (!queuePanel.hidden) settingsPanel.hidden = true;
+  if (!queuePanel.hidden) settingsBackdrop.hidden = true;
 });
 closeQueue.addEventListener("click", closeQueuePanel);
 
@@ -854,17 +939,16 @@ sidenav.addEventListener("click", (event) => {
   if (!btn) return;
   if (btn.dataset.nav === "home") loadHome();
   if (btn.dataset.nav === "downloads") loadDownloads();
-  if (btn.dataset.nav === "queue") { queuePanel.hidden = false; settingsPanel.hidden = true; }
+  if (btn.dataset.nav === "queue") { queuePanel.hidden = false; settingsBackdrop.hidden = true; }
   if (btn.dataset.nav === "settings") openSettings();
   if (navState.overlay) setNav(false, false);
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !queuePanel.hidden) {
-    queuePanel.hidden = true;
-    return;
-  }
-  if (event.key === "Escape" && navState.overlay && document.activeElement !== searchInput) {
-    setNav(false, false);
+  if (event.key === "Escape") {
+    if (!settingsGuideBackdrop.hidden) { closeSettingsGuide(); return; }
+    if (!settingsBackdrop.hidden) { closeSettingsPanel(); return; }
+    if (!queuePanel.hidden) { queuePanel.hidden = true; return; }
+    if (navState.overlay && document.activeElement !== searchInput) setNav(false, false);
   }
 });
 
@@ -904,48 +988,6 @@ function refreshHomeAfterCookieChange() {
   loadHome();
 }
 
-saveCookies.addEventListener("click", async () => {
-  const text = cookieText.value;
-  if (!text.trim()) {
-    cookieError.textContent = "Paste cookies.txt content first.";
-    cookieError.hidden = false;
-    return;
-  }
-  cookieError.hidden = true;
-  try {
-    let res = await backend.setCookiesFromText(text, false);
-    if (!res.ok && res.need_confirm) {
-      if (!confirm("cookies.txt exists. Overwrite?")) return;
-      res = await backend.setCookiesFromText(text, true);
-    }
-    if (!res.ok) {
-      cookieError.textContent = res.error || "Could not save cookies.";
-      cookieError.hidden = false;
-      return;
-    }
-    cookieText.value = "";
-    openSettings();
-    refreshHomeAfterCookieChange();
-  } catch (_) {
-    cookieError.textContent = "Could not save cookies.";
-    cookieError.hidden = false;
-  }
-});
-
-removeCookies.addEventListener("click", async () => {
-  if (!confirm("Remove cookies.txt? Recommendations turn off.")) return;
-  cookieError.hidden = true;
-  try {
-    await backend.removeCookies();
-    cookieText.value = "";
-    openSettings();
-    refreshHomeAfterCookieChange();
-  } catch (_) {
-    cookieError.textContent = "Could not remove cookies.";
-    cookieError.hidden = false;
-  }
-});
-
 window.addEventListener("pagehide", () => {
   if (sessionSaveTimer) {
     clearTimeout(sessionSaveTimer);
@@ -956,53 +998,156 @@ window.addEventListener("pagehide", () => {
 });
 
 settingsButton.addEventListener("click", openSettings);
-closeSettings.addEventListener("click", closeSettingsPanel);
+settingsX.addEventListener("click", closeSettingsPanel);
+mFooterClose.addEventListener("click", closeSettingsPanel);
+settingsBackdrop.addEventListener("mousedown", (e) => { if (e.target === settingsBackdrop) closeSettingsPanel(); });
 
-memoryMode.addEventListener("change", () => {
-  backend.setMemoryMode(memoryMode.checked);
+settingsModal.querySelectorAll(".tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    settingsModal.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    const name = btn.dataset.tab;
+    settingsModal.querySelectorAll(".panel-page").forEach((p) => { p.hidden = p.dataset.page !== name; });
+  });
 });
 
-offlineMode.addEventListener("change", async () => {
+mGuideBtn.addEventListener("click", () => { settingsGuideBackdrop.hidden = false; });
+mGuideClose.addEventListener("click", closeSettingsGuide);
+settingsGuideBackdrop.addEventListener("mousedown", (e) => { if (e.target === settingsGuideBackdrop) closeSettingsGuide(); });
+mCopySnippet.addEventListener("click", async () => {
+  const text = mCookieSnippet.textContent;
   try {
-    await backend.setOfflineMode(offlineMode.checked);
-  } catch (_) {}
-  refreshStatus();
-  if (offlineMode.checked) {
-    loadDownloads();
+    await navigator.clipboard.writeText(text);
+    showMToast("Snippet copied — paste it in your console.");
+  } catch (_) {
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove();
+    showMToast("Snippet copied — paste it in your console.");
   }
 });
 
-queueDepth.addEventListener("change", () => {
-  const val = Math.max(0, Math.min(10, Math.floor(Number(queueDepth.value) || 0)));
-  queueDepth.value = val;
-  backend.setQueueDepth(val);
+mMemoryCheck.addEventListener("click", () => {
+  const on = mMemoryCheck.getAttribute("aria-checked") !== "true";
+  setCheck(mMemoryCheck, on);
+  modalSettings.memory_mode = on;
+  if (backend) backend.setMemoryMode(on);
 });
 
-changeFolder.addEventListener("click", async () => {
-  const newPath = libraryDir.value.trim();
-  if (!newPath) return;
-  folderError.hidden = true;
+mOfflineCheck.addEventListener("click", async () => {
+  const on = mOfflineCheck.getAttribute("aria-checked") !== "true";
+  setCheck(mOfflineCheck, on);
+  modalSettings.offline_mode = on;
+  try { if (backend) await backend.setOfflineMode(on); } catch (_) {}
+  refreshStatus();
+  if (on) { closeSettingsPanel(); loadDownloads(); }
+});
+
+function clampMQueue() {
+  let v = Math.floor(Number(mQueueDepth.value) || 0);
+  v = Math.max(0, Math.min(10, v));
+  mQueueDepth.value = v;
+  return v;
+}
+
+function stepMQueue(d) {
+  let v = Math.floor(Number(mQueueDepth.value) || 0);
+  if (!Number.isFinite(v)) v = 0;
+  v = Math.max(0, Math.min(10, v + d));
+  mQueueDepth.value = v;
+  if (backend) backend.setQueueDepth(v);
+}
+
+mQMinus.addEventListener("pointerdown", (e) => { e.preventDefault(); mQMinus.focus(); stepMQueue(-1); });
+mQPlus.addEventListener("pointerdown", (e) => { e.preventDefault(); mQPlus.focus(); stepMQueue(1); });
+mQueueDepth.addEventListener("input", () => { if (mQueueDepth.value !== "") clampMQueue(); });
+mQueueDepth.addEventListener("blur", () => { const v = clampMQueue(); if (backend) backend.setQueueDepth(v); });
+mQueueDepth.addEventListener("change", () => { const v = clampMQueue(); if (backend) backend.setQueueDepth(v); });
+
+mChangeFolder.addEventListener("click", async () => {
+  const newPath = mFolderPath.value.trim();
+  if (!newPath || !backend) return;
+  mFolderError.hidden = true;
   const copy = confirm("Do you want to copy the existing audios to the new path?");
-  changeFolder.disabled = true;
+  mChangeFolder.disabled = true;
   try {
     const res = await backend.setLibraryDir(newPath, copy);
     if (!res.ok) {
-      folderError.textContent = res.error || "Could not change folder.";
-      folderError.hidden = false;
+      mFolderError.textContent = res.error || "Could not change folder.";
+      mFolderError.hidden = false;
+      showMToast("Could not change folder.");
     } else if (res.changed && copy) {
       const skipped = res.skipped && res.skipped.length ? ` (${res.skipped.length} skipped)` : "";
-      folderError.textContent = `Moved to ${res.path}: ${res.copied} copied${skipped}.`;
-      folderError.hidden = false;
-      libraryDir.value = res.path;
+      mFolderError.textContent = `Moved to ${res.path}: ${res.copied} copied${skipped}.`;
+      mFolderError.hidden = false;
+      mFolderPath.value = res.path;
+      showMToast(`Folder changed · ${res.copied} copied${skipped}`);
     } else if (res.changed) {
-      libraryDir.value = res.path;
-    }
+      mFolderPath.value = res.path;
+      showMToast("Download folder changed.");
+    } else { showMToast("Folder unchanged."); }
   } catch (_) {
-    folderError.textContent = "Could not change folder.";
-    folderError.hidden = false;
-  } finally {
-    changeFolder.disabled = false;
+    mFolderError.textContent = "Could not change folder.";
+    mFolderError.hidden = false;
+    showMToast("Could not change folder.");
+  } finally { mChangeFolder.disabled = false; }
+});
+
+mSaveCookies.addEventListener("click", async () => {
+  const text = mCookieText.value;
+  if (!text.trim()) {
+    mCookieError.textContent = "Paste cookies.txt content first.";
+    mCookieError.hidden = false;
+    return;
   }
+  mCookieError.hidden = true;
+  try {
+    let res = await backend.setCookiesFromText(text, false);
+    if (!res.ok && res.need_confirm) {
+      if (!confirm("cookies.txt exists. Overwrite?")) return;
+      res = await backend.setCookiesFromText(text, true);
+    }
+    if (!res.ok) {
+      mCookieError.textContent = res.error || "Could not save cookies.";
+      mCookieError.hidden = false;
+      showMToast("Could not save cookies.");
+      return;
+    }
+    mCookieText.value = "";
+    showMToast("Cookies saved.");
+    refreshCookiePill();
+    refreshHomeAfterCookieChange();
+  } catch (_) {
+    mCookieError.textContent = "Could not save cookies.";
+    mCookieError.hidden = false;
+    showMToast("Could not save cookies.");
+  }
+});
+
+mClearCookies.addEventListener("click", async () => {
+  if (!confirm("Remove cookies.txt? Recommendations turn off.")) return;
+  mCookieError.hidden = true;
+  try {
+    await backend.removeCookies();
+    mCookieText.value = "";
+    showMToast("Cookies removed.");
+    refreshCookiePill();
+    refreshHomeAfterCookieChange();
+  } catch (_) {
+    mCookieError.textContent = "Could not remove cookies.";
+    mCookieError.hidden = false;
+  }
+});
+
+mMiniPlay.addEventListener("click", () => togglePlayback());
+mMiniPrev.addEventListener("click", () => playPrev());
+mMiniNext.addEventListener("click", () => playNext());
+mMiniScrub.addEventListener("click", (e) => {
+  const r = e.currentTarget.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const total = Number.isFinite(audio.duration) && audio.duration > 0
+    ? audio.duration : (Number(state.current && state.current.duration) || 0);
+  if (total > 0) audio.currentTime = frac * total;
 });
 
 let lastPlayheadSent = -10;
@@ -1023,6 +1168,7 @@ audio.addEventListener("timeupdate", () => {
   scrubber.value = audio.currentTime;
   currentTime.textContent = formatTime(audio.currentTime);
   sendPlayhead(false);
+  syncMiniPlayer();
 });
 
 audio.addEventListener("seeked", () => sendPlayhead(true));
@@ -1034,6 +1180,7 @@ audio.addEventListener("loadedmetadata", () => {
   const displayDuration = knownDuration > 0 ? knownDuration : total;
   if (displayDuration > 0) scrubber.max = String(displayDuration);
   durationTime.textContent = formatTime(displayDuration);
+  syncMiniPlayer();
 });
 
 audio.addEventListener("ended", () => {
@@ -1047,12 +1194,14 @@ audio.addEventListener("play", () => {
   if (state.current && backend && backend.resumeDownload)
     backend.resumeDownload(state.current.id).catch(() => {});
   sendPlayhead(true);
+  syncMiniPlayer();
 });
 audio.addEventListener("pause", () => {
   updateTransportState();
   updateRowStates();
   if (state.current && backend && backend.pauseDownload)
     backend.pauseDownload(state.current.id).catch(() => {});
+  syncMiniPlayer();
 });
 audio.addEventListener("error", () => {
   updateRowStates();

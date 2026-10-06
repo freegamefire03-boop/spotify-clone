@@ -163,6 +163,13 @@ are unchanged; complete files still use exact-total 206s (`_serve_file`).
   - Keyboard: arrows move caret (plain = select only it + anchor follows);
     Shift+arrows extend/shrink anchor→caret; Ctrl+arrows move caret only;
     Ctrl+Space toggles caret; Ctrl+A selects all.
+  - Scope: selection lives in the main results list only (search / home /
+    downloads). Queue-panel rows keep single-click-to-play and have no
+    selection; queue reordering is grip-drag only (see §9).
+  - Selection action: while the selection is non-empty, a floating
+    "Add N to queue" button appears; activating it enqueues every selected row
+    (skipping ids already queued) and keeps the selection visible (queued flags
+    confirm). Clearing the selection hides the button.
 - Click-and-drag rubber-band select: past a ~4px movement threshold a drag
   becomes a selection rectangle (intersected rows selected); plain drag
   replaces, Ctrl+drag adds/toggles vs the pre-drag snapshot, Shift+drag extends
@@ -181,12 +188,16 @@ are unchanged; complete files still use exact-total 206s (`_serve_file`).
 
 ## 9. Round-3 work (added 2026-10-06, pending)
 
-- Queue drag-reorder: click-and-drag rows *inside the queue panel* reorders
-  the queue (this is the "future reorder/DnD" the §8 rubber-band item reserves
-  drags on already-selected rows for — selection rubber-banding stays in the
-  main list, queue drags reorder). Dropping a row inserts it at the drop
-  position; the playing index (`qIndex`) must follow the moved track; the new
-  order persists to the session. Touch/pointer + mouse; Esc cancels mid-drag.
+- Queue drag-reorder: reorder *inside the queue panel* by dragging a
+  grip handle only (this is the "future reorder/DnD" the §8 rubber-band item
+  reserves drags on already-selected rows for — selection rubber-banding stays
+  in the main list, queue drags reorder). Each queue row shows a ⋮⋮ grip icon
+  at its left edge on hover (YouTube-playlist style); pressing the grip starts
+  the drag, dropping inserts the row at the drop position. Single click
+  anywhere else on a queue row keeps the current play-on-click behavior, and
+  queue rows have no selection. The playing index (`qIndex`) must follow the
+  moved track; the new order persists to the session. Pointer + mouse;
+  Esc cancels mid-drag.
 - Real channel everywhere: every title must show its channel name (the artist),
   never "Unknown channel". yt-dlp provides the channel without problem, but
   today it is lost: flat search extraction often omits it, the DB has no

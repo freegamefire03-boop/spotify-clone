@@ -51,9 +51,13 @@
       <p class="muted">Audio is streamed from YouTube through the local proxy.</p>
     </div>
     <h2 id="homeTitle" class="home-title" hidden></h2>
-    <ul class="results" id="results"></ul>
+    <ul class="results" id="results" tabindex="0" aria-label="Results. Arrow keys move, Shift extends, Control Space toggles."></ul>
     <div class="more-wrap">
       <button id="moreButton" class="more-button" hidden>Show more</button>
+    </div>
+    <div id="selBar" class="sel-bar" hidden>
+      <button id="selAddBtn" class="sel-add">Add 0 to queue</button>
+      <button id="selClearBtn" class="sel-clear" title="Clear selection" aria-label="Clear selection">×</button>
     </div>
   </main>
 

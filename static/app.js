@@ -76,6 +76,84 @@ const edgeZone = document.getElementById("edgeZone");
 const PAGE = 10;
 const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null };
 
+// --- Multi-select state (main #results only) ---
+const selectionSet = new Set();
+let selCaret = null;
+let selAnchor = null;
+
+function rangeSlice(order, anchorId, targetId) {
+  if (!order.length || targetId == null) return [];
+  if (anchorId == null) return [targetId];
+  const a = order.indexOf(anchorId);
+  const b = order.indexOf(targetId);
+  if (a === -1 || b === -1) return [targetId];
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  return order.slice(lo, hi + 1);
+}
+
+function toggleIdList(list, id) {
+  return list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+}
+
+function unionOrdered(a, b) {
+  const seen = new Set(a);
+  const out = [...a];
+  for (const x of b) if (!seen.has(x)) { seen.add(x); out.push(x); }
+  return out;
+}
+
+function moveCaret(order, caretId, delta) {
+  if (!order.length) return null;
+  let i = order.indexOf(caretId);
+  if (i === -1) i = delta > 0 ? -1 : order.length;
+  const j = Math.min(order.length - 1, Math.max(0, i + delta));
+  return order[j];
+}
+
+function selectedIdsInDomOrder() {
+  const order = [...resultsList.querySelectorAll(".row")].map((r) => r.dataset.id);
+  const inSel = new Set(selectionSet);
+  return order.filter((id) => inSel.has(id));
+}
+
+function domOrderIds() {
+  return [...resultsList.querySelectorAll(".row")].map((r) => r.dataset.id);
+}
+
+function selectOnly(id) {
+  selectionSet.clear();
+  selectionSet.add(id);
+  selCaret = id; selAnchor = id;
+  syncSelectionUI();
+}
+
+function toggleOne(id) {
+  if (selectionSet.has(id)) selectionSet.delete(id);
+  else selectionSet.add(id);
+  selCaret = id; selAnchor = id;
+  syncSelectionUI();
+}
+
+function selectRangeTo(id, additive) {
+  const ids = rangeSlice(domOrderIds(), selAnchor, id);
+  if (additive) {
+    for (const x of ids) selectionSet.add(x);
+  } else {
+    selectionSet.clear();
+    for (const x of ids) selectionSet.add(x);
+  }
+  selCaret = id;
+  if (selAnchor == null) selAnchor = id;
+  syncSelectionUI();
+}
+
+function clearSelection(refocusContainer) {
+  selectionSet.clear();
+  selCaret = null; selAnchor = null;
+  syncSelectionUI();
+  if (refocusContainer) resultsList.focus({ preventScroll: true });
+}
+
 const navState = { push: false, overlay: false };
 function renderNav() {
   document.body.classList.toggle("nav-push", navState.push);
@@ -296,7 +374,7 @@ function closeQueuePanel() {
 
 function rowMarkup(track) {
   return `
-    <li class="row" data-id="${track.id}">
+    <li class="row" data-id="${track.id}" tabindex="-1" aria-selected="false">
       <img class="thumb" src="${track.thumbnail}" alt="" loading="lazy" />
       <div class="meta">
         <div class="title">${escapeHtml(track.title)}</div>
@@ -332,6 +410,28 @@ function updateRowStates() {
       flag.textContent = "";
     }
   });
+  syncSelectionUI();
+}
+
+const selBar = document.getElementById("selBar");
+const selAddBtn = document.getElementById("selAddBtn");
+const selClearBtn = document.getElementById("selClearBtn");
+
+function syncSelectionUI() {
+  document.querySelectorAll("#results .row").forEach((row) => {
+    const on = selectionSet.has(row.dataset.id);
+    row.classList.toggle("is-selected", on);
+    row.setAttribute("aria-selected", String(on));
+    if (row.dataset.id === selCaret) row.dataset.caret = "1";
+    else delete row.dataset.caret;
+  });
+  updateSelBar();
+}
+
+function updateSelBar() {
+  const n = selectionSet.size;
+  selBar.hidden = n === 0;
+  selAddBtn.textContent = `Add ${n} to queue`;
 }
 
 function renderResults() {
@@ -850,6 +950,77 @@ function togglePlayback() {
   else audio.pause();
 }
 
+resultsList.addEventListener("pointerdown", (event) => {
+  if (event.button === 2) return;
+  const row = event.target.closest(".row");
+  if (!row || !resultsList.contains(row)) return;
+  const id = row.dataset.id;
+  if (!id) return;
+  const mod = event.ctrlKey || event.metaKey;
+  if (mod && event.shiftKey) selectRangeTo(id, true);
+  else if (mod) toggleOne(id);
+  else if (event.shiftKey) selectRangeTo(id, false);
+  else selectOnly(id);
+  row.focus({ preventScroll: true });
+});
+
+resultsList.addEventListener("keydown", (event) => {
+  const order = domOrderIds();
+  if (!order.length) return;
+  const inResults = resultsList.contains(document.activeElement) || document.activeElement === resultsList;
+  if (!inResults) return;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "") && document.activeElement !== resultsList) return;
+
+  const mod = event.ctrlKey || event.metaKey;
+  const focusCaret = () => {
+    const el = resultsList.querySelector(`.row[data-id="${CSS.escape(selCaret ?? "")}"]`);
+    if (el) el.focus({ preventScroll: false });
+  };
+
+  if (mod && (event.key === "a" || event.key === "A")) {
+    event.preventDefault();
+    selectionSet.clear();
+    for (const id of order) selectionSet.add(id);
+    selCaret = order[order.length - 1];
+    selAnchor = order[0];
+    syncSelectionUI();
+    return;
+  }
+  if (mod && event.key === " ") {
+    event.preventDefault();
+    if (selCaret != null) toggleOne(selCaret);
+    return;
+  }
+  const delta = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1
+    : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 0;
+  if (delta !== 0) {
+    event.preventDefault();
+    const next = moveCaret(order, selCaret, delta);
+    if (next == null) return;
+    if (event.shiftKey) {
+      if (selAnchor == null) selAnchor = selCaret ?? next;
+      const ids = new Set(rangeSlice(order, selAnchor, next));
+      if (!mod) {
+        selectionSet.clear();
+        for (const x of ids) selectionSet.add(x);
+      } else {
+        for (const x of ids) selectionSet.add(x);
+      }
+      selCaret = next;
+      syncSelectionUI();
+      focusCaret();
+    } else if (mod) {
+      selCaret = next;
+      syncSelectionUI();
+      focusCaret();
+    } else {
+      selectOnly(next);
+      focusCaret();
+    }
+  }
+});
+
+// NOTE: selection lives on pointerdown; click stays button-only so a future dblclick→play hook is trivial.
 resultsList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   const row = event.target.closest(".row");
@@ -911,6 +1082,7 @@ searchInput.addEventListener("keydown", (event) => {
     if (!settingsGuideBackdrop.hidden) { closeSettingsGuide(); event.preventDefault(); return; }
     if (!settingsBackdrop.hidden) { closeSettingsPanel(); event.preventDefault(); return; }
     if (!queuePanel.hidden) return;
+    if (selectionSet.size) { clearSelection(false); event.preventDefault(); return; }
     searchInput.value = "";
     loadHome();
     if (navState.overlay) setNav(false, false);
@@ -948,6 +1120,7 @@ document.addEventListener("keydown", (event) => {
     if (!settingsGuideBackdrop.hidden) { closeSettingsGuide(); return; }
     if (!settingsBackdrop.hidden) { closeSettingsPanel(); return; }
     if (!queuePanel.hidden) { queuePanel.hidden = true; return; }
+    if (selectionSet.size) { clearSelection(true); return; }
     if (navState.overlay && document.activeElement !== searchInput) setNav(false, false);
   }
 });
@@ -970,6 +1143,25 @@ clearQueue.addEventListener("click", () => {
   updateRowStates();
   scheduleSaveSession();
 });
+
+selAddBtn.addEventListener("click", () => {
+  if (!selectionSet.size) return;
+  const queued = new Set(state.queue.map((t) => t.id));
+  const domIds = selectedIdsInDomOrder();
+  const domSet = new Set(domIds);
+  const stale = [...selectionSet].filter((id) => !domSet.has(id));
+  for (const id of [...domIds, ...stale]) {
+    if (queued.has(id)) continue;
+    const track = trackById(id);
+    if (!track) continue;
+    state.queue.push(track);
+    queued.add(id);
+  }
+  renderQueue();
+  updateRowStates();
+  scheduleSaveSession();
+});
+selClearBtn.addEventListener("click", () => clearSelection(false));
 
 addLinks.addEventListener("click", toggleAddLinks);
 cancelLinks.addEventListener("click", toggleAddLinks);

@@ -171,6 +171,7 @@ bitrateBtns.forEach(btn => {
 });
 
 function openSettings() {
+  queuePanel.hidden = true;
   settingsPanel.hidden = false;
   backend.getSettings().then((s) => {
     memoryMode.checked = !!s.memory_mode;
@@ -194,6 +195,10 @@ function openSettings() {
 
 function closeSettingsPanel() {
   settingsPanel.hidden = true;
+}
+
+function closeQueuePanel() {
+  queuePanel.hidden = true;
 }
 
 function rowMarkup(track) {
@@ -642,6 +647,7 @@ searchInput.addEventListener("input", () => {
 
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    if (!queuePanel.hidden) return;
     searchInput.value = "";
     loadHome();
     if (navState.overlay) setNav(false, false);
@@ -652,8 +658,11 @@ moreButton.addEventListener("click", () => runSearch(state.query, true));
 playButton.addEventListener("click", () => togglePlayback());
 prevButton.addEventListener("click", () => playPrev());
 nextButton.addEventListener("click", () => playNext());
-queueButton.addEventListener("click", () => { queuePanel.hidden = !queuePanel.hidden; });
-closeQueue.addEventListener("click", () => { queuePanel.hidden = true; });
+queueButton.addEventListener("click", () => {
+  queuePanel.hidden = !queuePanel.hidden;
+  if (!queuePanel.hidden) settingsPanel.hidden = true;
+});
+closeQueue.addEventListener("click", closeQueuePanel);
 
 menuButton.addEventListener("click", () => setNav(!navState.push, false));
 edgeZone.addEventListener("mouseenter", () => {
@@ -666,14 +675,29 @@ sidenav.addEventListener("click", (event) => {
   const btn = event.target.closest("[data-nav]");
   if (!btn) return;
   if (btn.dataset.nav === "home") loadHome();
-  if (btn.dataset.nav === "queue") queuePanel.hidden = false;
+  if (btn.dataset.nav === "queue") { queuePanel.hidden = false; settingsPanel.hidden = true; }
   if (btn.dataset.nav === "settings") openSettings();
   if (navState.overlay) setNav(false, false);
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !queuePanel.hidden) {
+    queuePanel.hidden = true;
+    return;
+  }
   if (event.key === "Escape" && navState.overlay && document.activeElement !== searchInput) {
     setNav(false, false);
   }
+});
+
+document.addEventListener("click", (event) => {
+  if (queuePanel.hidden) return;
+  if (queuePanel.contains(event.target) || event.target === queueButton) return;
+  queuePanel.hidden = true;
+});
+
+queuePanel.addEventListener("focusout", (event) => {
+  if (queuePanel.contains(event.relatedTarget) || event.relatedTarget === queueButton) return;
+  queuePanel.hidden = true;
 });
 
 clearQueue.addEventListener("click", () => {

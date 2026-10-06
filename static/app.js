@@ -362,6 +362,147 @@ document.addEventListener("keydown", (e) => {
   }
 }, true);
 
+// --- Queue grip-drag reorder (queue panel only, no selection) ---
+let qDragId = null, qDragFrom = -1, qDragInsert = -1;
+let qDragArmed = false, qDragActive = false;
+let qDragOrigin = { x: 0, y: 0 };
+let qDragLastY = 0, qDragSuppressClick = false;
+let qDragLine = null, qDragScrollTimer = null;
+const QDRAG_THRESHOLD = 4;
+const QDRAG_EDGE = 24;
+
+function remapQIndex(oldQ, from, to) {
+  if (oldQ === from) return to;
+  if (from < to) {
+    if (oldQ > from && oldQ <= to) return oldQ - 1;
+  } else if (from > to) {
+    if (oldQ >= to && oldQ < from) return oldQ + 1;
+  }
+  return oldQ;
+}
+
+function insertIndexAt(clientY, rects, draggedId) {
+  let k = 0;
+  for (const r of rects) {
+    if (r.id === draggedId) continue;
+    if (clientY >= (r.top + r.bottom) / 2) k++;
+    else break;
+  }
+  return k;
+}
+
+function qDragRects() {
+  return [...queueList.querySelectorAll(".queue-item")].map((el) => {
+    const b = el.getBoundingClientRect();
+    const idx = Number(el.dataset.index);
+    return { id: state.queue[idx]?.id ?? `dom-${idx}`, top: b.top, bottom: b.bottom, el };
+  });
+}
+
+function qEnsureLine() {
+  if (!qDragLine) {
+    qDragLine = document.createElement("div");
+    qDragLine.className = "q-drop-line";
+    qDragLine.hidden = true;
+    queuePanel.appendChild(qDragLine);
+  }
+  return qDragLine;
+}
+
+function qDragOnMove(e) {
+  if (!qDragArmed) return;
+  if (!qDragActive) {
+    if (Math.hypot(e.clientX - qDragOrigin.x, e.clientY - qDragOrigin.y) <= QDRAG_THRESHOLD) return;
+    qDragActive = true;
+  }
+  qDragLastY = e.clientY;
+  const rects = qDragRects();
+  qDragInsert = insertIndexAt(e.clientY, rects, qDragId);
+  queueList.querySelectorAll(".queue-item.is-dragging").forEach((el) => el.classList.remove("is-dragging"));
+  const dragEl = [...queueList.querySelectorAll(".queue-item")]
+    .find((el) => state.queue[Number(el.dataset.index)]?.id === qDragId);
+  if (dragEl) dragEl.classList.add("is-dragging");
+  const excl = rects.filter((r) => r.id !== qDragId);
+  const panelBox = queuePanel.getBoundingClientRect();
+  let lineClientY;
+  if (!excl.length) return;
+  else if (qDragInsert >= excl.length) lineClientY = excl[excl.length - 1].bottom;
+  else if (qDragInsert <= 0) lineClientY = excl[0].top;
+  else lineClientY = (excl[qDragInsert - 1].bottom + excl[qDragInsert].top) / 2;
+  const line = qEnsureLine();
+  line.style.top = (lineClientY - panelBox.top + queuePanel.scrollTop) + "px";
+  line.hidden = false;
+  qKickAutoscroll();
+}
+
+function qKickAutoscroll() {
+  if (qDragScrollTimer) return;
+  qDragScrollTimer = setInterval(() => {
+    if (!qDragArmed || !qDragActive) return qStopAutoscroll();
+    const c = queuePanel.getBoundingClientRect();
+    const y = qDragLastY;
+    let dir = 0, dist = Infinity;
+    if (y < c.top + QDRAG_EDGE && y >= c.top - 40) { dir = -1; dist = Math.max(0, y - c.top); }
+    else if (y > c.bottom - QDRAG_EDGE && y <= c.bottom + 40) { dir = 1; dist = Math.max(0, c.bottom - y); }
+    else return;
+    queuePanel.scrollTop += dir * (Math.ceil(14 * (1 - Math.min(1, dist / QDRAG_EDGE))) + 2);
+    qDragOnMove({ clientX: qDragOrigin.x, clientY: qDragLastY });
+  }, 16);
+}
+
+function qStopAutoscroll() { if (qDragScrollTimer) { clearInterval(qDragScrollTimer); qDragScrollTimer = null; } }
+
+function qSettle() {
+  window.removeEventListener("pointermove", qDragOnMove);
+  window.removeEventListener("pointerup", qDragOnUp);
+  window.removeEventListener("pointercancel", qDragOnCancel);
+  qStopAutoscroll();
+  if (qDragLine) qDragLine.hidden = true;
+  queueList.querySelectorAll(".queue-item.is-dragging").forEach((el) => el.classList.remove("is-dragging"));
+  qDragArmed = false; qDragActive = false;
+}
+
+function qDragOnUp(e) {
+  window.removeEventListener("pointercancel", qDragOnCancel);
+  const wasActive = qDragActive;
+  const r = queueList.getBoundingClientRect();
+  const inside = e.clientY >= r.top - 8 && e.clientY <= r.bottom + 8 && e.clientX >= r.left && e.clientX <= r.right;
+  const from = state.queue.findIndex((t) => t.id === qDragId);
+  const to = qDragInsert;
+  qSettle();
+  if (!wasActive || !inside || from === -1 || to === from) return;
+  const [mv] = state.queue.splice(from, 1);
+  state.queue.splice(to, 0, mv);
+  state.qIndex = remapQIndex(state.qIndex, from, to);
+  renderQueue(); updateRowStates(); scheduleSaveSession();
+}
+
+function qDragOnCancel() { qSettle(); }
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && qDragArmed) { e.stopImmediatePropagation(); qSettle(); }
+}, true);
+
+queueList.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  const grip = e.target.closest(".q-grip");
+  if (!grip) return;
+  const row = grip.closest(".queue-item");
+  if (!row || !queueList.contains(row)) return;
+  if (state.queue.length < 2) return;
+  e.preventDefault();
+  qDragId = state.queue[Number(row.dataset.index)]?.id ?? null;
+  if (!qDragId) return;
+  qDragFrom = Number(row.dataset.index);
+  qDragOrigin = { x: e.clientX, y: e.clientY };
+  qDragLastY = e.clientY;
+  qDragArmed = true; qDragActive = false; qDragInsert = qDragFrom;
+  qDragSuppressClick = true;
+  window.addEventListener("pointermove", qDragOnMove);
+  window.addEventListener("pointerup", qDragOnUp, { once: true });
+  window.addEventListener("pointercancel", qDragOnCancel, { once: true });
+});
+
 const navState = { push: false, overlay: false };
 function renderNav() {
   document.body.classList.toggle("nav-push", navState.push);
@@ -785,6 +926,7 @@ function renderQueue() {
   queueList.innerHTML = state.queue
     .map((track, index) => `
       <li class="queue-item${state.current && state.current.id === track.id ? " is-current" : ""}" data-index="${index}">
+        <span class="q-grip" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
         <span class="q-title">${index + 1}. ${escapeHtml(track.title)}</span>
         <button class="q-remove" data-remove="${index}" title="Remove" aria-label="Remove">&times;</button>
       </li>`)
@@ -1268,6 +1410,10 @@ resultsList.addEventListener("mouseover", (event) => {
 });
 
 queueList.addEventListener("click", (event) => {
+  if (qDragSuppressClick) {
+    qDragSuppressClick = false;
+    if (event.target.closest(".q-grip")) { event.stopPropagation(); return; }
+  }
   const remove = event.target.closest("[data-remove]");
   if (remove) {
     event.stopPropagation();

@@ -262,6 +262,36 @@ body.nav-push .content, body.nav-push .player { margin-left: var(--sidenav-w); }
 .queue-item .q-remove:hover { color: #fff; }
 .queue-item.is-current .q-title { color: #1db954; }
 
+.queue-item .q-grip {
+  flex: 0 0 auto;
+  width: 14px;
+  margin-left: -2px;
+  color: #777;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: -2px;
+  opacity: 0;
+  visibility: hidden;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.queue-item:hover .q-grip,
+.queue-item.is-dragging .q-grip { opacity: 1; visibility: visible; }
+.queue-item.is-dragging { opacity: .5; }
+.queue-item.is-dragging .q-grip { cursor: grabbing; }
+.q-drop-line {
+  position: absolute;
+  left: 10px; right: 10px;
+  height: 2px;
+  background: #1db954;
+  border-radius: 1px;
+  pointer-events: none;
+  z-index: 21;
+}
+.q-drop-line[hidden] { display: none; }
+
 .queue-add { margin-bottom: 8px; }
 #queueLinks {
   width: 100%;

@@ -673,6 +673,12 @@ function refreshCookiePill() {
   });
 }
 
+function realDuration() {
+  const el = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+  if (el > 0) return el;
+  return Number(state.current && state.current.duration) || 0;
+}
+
 function syncMiniPlayer() {
   if (!state.current) {
     mMiniTitle.textContent = "Nothing playing";
@@ -685,8 +691,7 @@ function syncMiniPlayer() {
   mMiniPlay.textContent = playing ? "❚❚" : "▶";
   mMiniState.textContent = playing ? "Playing" : "Paused";
   const cur = Number(audio.currentTime) || 0;
-  const total = Number.isFinite(audio.duration) && audio.duration > 0
-    ? audio.duration : (Number(state.current && state.current.duration) || 0);
+  const total = realDuration();
   mMiniCur.textContent = formatTime(cur);
   mMiniDur.textContent = formatTime(total);
   mMiniFill.style.width = total > 0 ? Math.min(100, (cur / total) * 100) + "%" : "0%";
@@ -1835,12 +1840,18 @@ audio.addEventListener("seeked", () => sendPlayhead(true));
 audio.addEventListener("play", () => sendPlayhead(true));
 
 audio.addEventListener("loadedmetadata", () => {
-  const total = Number.isFinite(audio.duration) ? audio.duration : 0;
-  const knownDuration = Number(state.current && state.current.duration) || 0;
-  const displayDuration = knownDuration > 0 ? knownDuration : total;
+  const displayDuration = realDuration();
   if (displayDuration > 0) scrubber.max = String(displayDuration);
   paintScrubber();
   durationTime.textContent = formatTime(displayDuration);
+  syncMiniPlayer();
+});
+
+audio.addEventListener("durationchange", () => {
+  if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+  scrubber.max = String(audio.duration);
+  paintScrubber();
+  durationTime.textContent = formatTime(audio.duration);
   syncMiniPlayer();
 });
 
@@ -1892,7 +1903,8 @@ scrubber.addEventListener("pointerdown", () => { scrubber.dataset.dragging = "1"
 window.addEventListener("pointerup", () => { scrubber.dataset.dragging = "0"; });
 scrubber.addEventListener("input", () => { currentTime.textContent = formatTime(Number(scrubber.value)); paintScrubber(); });
 scrubber.addEventListener("change", () => {
-  if (Number.isFinite(audio.duration)) audio.currentTime = Number(scrubber.value);
+  const dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null;
+  if (dur !== null) audio.currentTime = Math.min(Number(scrubber.value), dur);
   paintScrubber();
 });
 

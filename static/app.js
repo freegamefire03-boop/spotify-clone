@@ -1084,6 +1084,7 @@ async function playTrack(track, _skipSeen = new Set()) {
   currentTime.textContent = "0:00";
   const knownDuration = Number(track.duration) || 0;
   if (knownDuration > 0) scrubber.max = String(knownDuration);
+  paintScrubber();
 
   // Register the track and kick off the local-library download before playback,
   // so /audio/<id> can serve the file (or the partial file) from disk.
@@ -1788,6 +1789,7 @@ function sendPlayhead(force) {
 audio.addEventListener("timeupdate", () => {
   if (scrubber.dataset.dragging === "1") return;
   scrubber.value = audio.currentTime;
+  paintScrubber();
   currentTime.textContent = formatTime(audio.currentTime);
   sendPlayhead(false);
   syncMiniPlayer();
@@ -1801,6 +1803,7 @@ audio.addEventListener("loadedmetadata", () => {
   const knownDuration = Number(state.current && state.current.duration) || 0;
   const displayDuration = knownDuration > 0 ? knownDuration : total;
   if (displayDuration > 0) scrubber.max = String(displayDuration);
+  paintScrubber();
   durationTime.textContent = formatTime(displayDuration);
   syncMiniPlayer();
 });
@@ -1838,11 +1841,23 @@ audio.addEventListener("error", () => {
   npChannel.textContent = "Stream unavailable";
 });
 
+// --- Scrubber played-portion fill ---
+function paintScrubber() {
+  const max = Number(scrubber.max);
+  const ok = Number.isFinite(max) && max > 0;
+  const val = Number(scrubber.value) || 0;
+  const pct = ok ? Math.min(100, Math.max(0, (val / max) * 100)) : 0;
+  scrubber.style.background = pct > 0
+    ? `linear-gradient(to right, #fff ${pct}%, #4d4d4d ${pct}%)`
+    : "#4d4d4d";
+}
+
 scrubber.addEventListener("pointerdown", () => { scrubber.dataset.dragging = "1"; });
 window.addEventListener("pointerup", () => { scrubber.dataset.dragging = "0"; });
-scrubber.addEventListener("input", () => { currentTime.textContent = formatTime(Number(scrubber.value)); });
+scrubber.addEventListener("input", () => { currentTime.textContent = formatTime(Number(scrubber.value)); paintScrubber(); });
 scrubber.addEventListener("change", () => {
   if (Number.isFinite(audio.duration)) audio.currentTime = Number(scrubber.value);
+  paintScrubber();
 });
 
 volume.addEventListener("input", () => { audio.volume = Number(volume.value); });

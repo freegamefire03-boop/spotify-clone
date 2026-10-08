@@ -235,6 +235,7 @@ body.mode-downloads .row .row-delete:hover { color: #ff5c5c; background: #3a1d1d
 .icon-button { width: 34px; height: 34px; border-radius: 50%; }
 .icon-button:hover { color: #fff; background: #2a2a2a; }
 .icon-button.is-playing { color: #1db954; }
+.icon-button.active { color: #1db954; }
 
 .play-button { width: 36px; height: 36px; border-radius: 50%; color: #fff; background: #2a2a2a; }
 .play-button:hover { background: #1db954; color: #06170c; }

@@ -60,9 +60,11 @@
         <option value="durAsc">Duration: short first</option>
         <option value="durDesc">Duration: long first</option>
       </select>
+      <button id="dlShuffle" class="text-button">Shuffle</button>
     </div>
     <ul class="results" id="results" tabindex="0" aria-label="Results. Arrow keys move, Shift extends, Control Space toggles."></ul>
     <div class="more-wrap">
+      <button id="ctxShuffle" class="text-button" hidden>Shuffle</button>
       <button id="moreButton" class="more-button" hidden>Show more</button>
     </div>
     <div id="selBar" class="sel-bar" hidden>
@@ -77,6 +79,7 @@
       <span>Queue (<span id="queueCount">0</span>)</span>
       <div>
         <button id="addLinks" class="link-button">Add links</button>
+        <button id="queueShuffle" class="link-button" title="Shuffle queue">Shuffle</button>
         <button id="clearQueue" class="link-button">Clear</button>
         <button id="closeQueue" class="icon-button" title="Hide queue" aria-label="Hide queue">&times;</button>
       </div>
@@ -234,6 +237,9 @@
 
     <div class="transport">
       <div class="buttons">
+        <button id="shuffleButton" class="icon-button" title="Shuffle: off" aria-label="Shuffle" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>
+        </button>
         <button id="prevButton" class="icon-button" title="Previous" aria-label="Previous">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14"/><path d="M19 5 9 12l10 7z"/></svg>
         </button>

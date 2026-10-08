@@ -22,6 +22,10 @@ const queuePanel = document.getElementById("queuePanel");
 const queueList = document.getElementById("queueList");
 const queueCount = document.getElementById("queueCount");
 const clearQueue = document.getElementById("clearQueue");
+const shuffleButton = document.getElementById("shuffleButton");
+const ctxShuffle = document.getElementById("ctxShuffle");
+const dlShuffle = document.getElementById("dlShuffle");
+const queueShuffle = document.getElementById("queueShuffle");
 const closeQueue = document.getElementById("closeQueue");
 const addLinks = document.getElementById("addLinks");
 const queueAdd = document.getElementById("queueAdd");
@@ -76,7 +80,7 @@ const sidenav = document.getElementById("sidenav");
 const edgeZone = document.getElementById("edgeZone");
 
 const PAGE = 10;
-const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null, dlSort: "recent", dlDownloads: [] };
+const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null, dlSort: "recent", dlDownloads: [], shuffle: false };
 
 // --- Multi-select state (main #results only) ---
 const selectionSet = new Set();
@@ -837,6 +841,7 @@ function applyDlSort() {
 
 function renderResults() {
   document.body.classList.toggle("mode-downloads", state.mode === "downloads");
+  ctxShuffle.hidden = !(state.mode !== "downloads" && state.results.length > 1);
   if (state.mode === "home") {
     const sections = state.homeSections && state.homeSections.length
       ? state.homeSections
@@ -1267,6 +1272,45 @@ function addToQueue(track) {
   scheduleSaveSession();
 }
 
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function setShuffle(on) {
+  state.shuffle = !!on;
+  shuffleButton.classList.toggle("active", state.shuffle);
+  shuffleButton.setAttribute("aria-pressed", String(state.shuffle));
+  shuffleButton.title = state.shuffle ? "Shuffle: on" : "Shuffle: off";
+}
+
+function playShuffled(tracks) {
+  if (!tracks || tracks.length === 0) return;
+  state.queue = shuffleArray(tracks.slice());
+  state.qIndex = 0;
+  renderQueue();
+  updateRowStates();
+  scheduleSaveSession();
+  setShuffle(true);
+  playTrack(state.queue[0]);
+}
+
+function shuffleQueueInPlace() {
+  if (state.queue.length < 2) return;
+  const currentId = state.current ? state.current.id : null;
+  shuffleArray(state.queue);
+  if (currentId != null) {
+    const ni = state.queue.findIndex((t) => t.id === currentId);
+    if (ni !== -1) state.qIndex = ni;
+  }
+  renderQueue();
+  updateRowStates();
+  scheduleSaveSession();
+}
+
 function toggleAddLinks() {
   queueAdd.hidden = !queueAdd.hidden;
   if (!queueAdd.hidden) {
@@ -1348,6 +1392,14 @@ async function restoreSession() {
 }
 
 function playNext(_skipSeen = new Set()) {
+  if (state.shuffle && state.queue.length > 1) {
+    let ni;
+    do {
+      ni = Math.floor(Math.random() * state.queue.length);
+    } while (ni === state.qIndex);
+    state.qIndex = ni;
+    return playTrack(state.queue[ni], _skipSeen);
+  }
   if (state.qIndex + 1 < state.queue.length) {
     state.qIndex += 1;
     return playTrack(state.queue[state.qIndex], _skipSeen);
@@ -1359,6 +1411,14 @@ function playPrev() {
   if (audio.currentTime > 3) {
     audio.currentTime = 0;
     return true;
+  }
+  if (state.shuffle && state.queue.length > 1) {
+    let ni;
+    do {
+      ni = Math.floor(Math.random() * state.queue.length);
+    } while (ni === state.qIndex);
+    state.qIndex = ni;
+    return playTrack(state.queue[ni]);
   }
   if (modalSettings.offline_mode) {
     return playPrevComplete();
@@ -1593,6 +1653,11 @@ clearQueue.addEventListener("click", () => {
   updateRowStates();
   scheduleSaveSession();
 });
+
+shuffleButton.addEventListener("click", () => setShuffle(!state.shuffle));
+ctxShuffle.addEventListener("click", () => playShuffled(state.results.slice()));
+dlShuffle.addEventListener("click", () => playShuffled(state.dlDownloads.slice()));
+queueShuffle.addEventListener("click", shuffleQueueInPlace);
 
 selAddBtn.addEventListener("click", () => {
   if (!selectionSet.size) return;

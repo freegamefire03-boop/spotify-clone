@@ -80,7 +80,7 @@ const sidenav = document.getElementById("sidenav");
 const edgeZone = document.getElementById("edgeZone");
 
 const PAGE = 10;
-const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null, dlSort: "recent", dlDownloads: [], shuffle: false };
+const state = { query: "", results: [], total: 0, queue: [], qIndex: -1, current: null, loading: false, ready: false, mode: "home", home: [], homeMode: null, dlSort: "recent", dlDownloads: [], shuffle: false, channels: [] };
 
 // --- Multi-select state (main #results only) ---
 const selectionSet = new Set();
@@ -559,6 +559,8 @@ function useBridge() {
     setCookiesFromText: (t, ow) => api.set_cookies_from_text(t, ow),
     removeCookies: () => api.remove_cookies(),
     addLinks: (text) => api.add_links(text),
+    addChannelToQueue: (url) => api.add_channel_to_queue(url),
+    addChannelToDownloads: (url) => api.add_channel_to_downloads(url),
   };
   state.ready = true;
   document.body.classList.add("native");
@@ -754,6 +756,21 @@ function rowMarkup(track) {
     </li>`;
 }
 
+function channelMarkup(c) {
+  return `
+    <li class="channel-card" data-channel-url="${escapeHtml(c.channel_url)}">
+      <img class="thumb" src="${escapeHtml(c.thumbnail)}" alt="" loading="lazy" />
+      <div class="meta">
+        <div class="title">${escapeHtml(c.name)}</div>
+        <div class="channel">Channel</div>
+      </div>
+      <div class="ch-actions">
+        <button class="text-button" data-action="ch-queue" title="Add whole channel to queue" aria-label="Add whole channel to queue">+ Queue</button>
+        <button class="text-button" data-action="ch-download" title="Download whole channel (staggered)" aria-label="Download whole channel">Download</button>
+      </div>
+    </li>`;
+}
+
 function updateRowStates() {
   const playing = !audio.paused && !audio.ended;
   document.querySelectorAll(".row").forEach((row) => {
@@ -884,7 +901,10 @@ function renderResults() {
   }
   homeTitle.hidden = true;
   dlToolbar.hidden = true;
-  resultsList.innerHTML = state.results.map(rowMarkup).join("");
+  const channelHtml = state.mode === "search" && state.channels.length
+    ? `<h2 class="home-section-title">Channels</h2>` + state.channels.map(channelMarkup).join("")
+    : "";
+  resultsList.innerHTML = channelHtml + state.results.map(rowMarkup).join("");
   emptyState.hidden = state.results.length > 0;
   moreButton.hidden = state.results.length === 0 || state.results.length >= state.total;
   moreButton.textContent = state.loading ? "Loading..." : `Show more (${state.results.length}/${state.total})`;
@@ -977,6 +997,7 @@ async function runSearch(query, append) {
     setCookieStatus(!!data.cookies);
     state.total = data.total || 0;
     state.results = append ? state.results.concat(data.items) : data.items;
+    if (!append) state.channels = data.channels || [];
     if (state.total === 0) {
       emptyState.hidden = false;
       emptyState.querySelector("p").textContent = `No results for "${trimmed}".`;
@@ -984,6 +1005,7 @@ async function runSearch(query, append) {
   } catch (err) {
     if (!append) {
       state.results = [];
+      state.channels = [];
       state.total = 0;
       emptyState.hidden = false;
       emptyState.querySelector("p").textContent = `Search failed: ${err.message || err}`;
@@ -1519,8 +1541,49 @@ resultsList.addEventListener("dblclick", (event) => {
   if (state.current && state.current.id === track.id) togglePlayback();
   else playTrack(track);
 });
-resultsList.addEventListener("click", (event) => {
+resultsList.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
+  const card = event.target.closest(".channel-card");
+  if (card && button && (button.dataset.action === "ch-queue" || button.dataset.action === "ch-download")) {
+    const channelUrl = card.dataset.channelUrl;
+    if (!channelUrl || !backend) return;
+    button.disabled = true;
+    try {
+      if (button.dataset.action === "ch-queue") {
+        const res = await backend.addChannelToQueue(channelUrl);
+        if (!res || !res.ok) {
+          showMToast((res && (res.error || res.reason)) || "Channel has no videos.");
+        } else {
+          const existing = new Set(state.queue.map((t) => t.id));
+          let added = 0;
+          for (const t of (res.items || [])) {
+            if (!t || !t.id || existing.has(t.id)) continue;
+            existing.add(t.id);
+            state.queue.push(t);
+            added++;
+          }
+          renderQueue();
+          updateRowStates();
+          scheduleSaveSession();
+          showMToast(`Added ${added} track${added === 1 ? "" : "s"} to queue.`);
+        }
+      } else {
+        const res = await backend.addChannelToDownloads(channelUrl);
+        if (!res || !res.ok) {
+          showMToast((res && (res.error || res.reason)) || "Channel download skipped.");
+        } else if (res.queued) {
+          showMToast(`Channel queued: ${res.queued} download${res.queued === 1 ? "" : "s"}, staggered ~30s apart.`);
+        } else {
+          showMToast("Nothing to download (empty or already saved).");
+        }
+      }
+    } catch (_) {
+      showMToast("Could not add channel.");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
   const row = event.target.closest(".row");
   if (!row) return;
   const track = trackById(row.dataset.id);

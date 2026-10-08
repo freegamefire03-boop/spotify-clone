@@ -68,6 +68,12 @@ SEARCH_TTL = 600.0
 STREAM_TTL = 240.0
 HOME_LIMIT = 20
 HOME_TTL = 600.0
+MAX_CHANNEL_RESULTS = 5
+MAX_CHANNEL_VIDEOS = 50
+# Staggered bulk downloads: wait before the first start, then one start per
+# gap. Keeps channel downloads off the foreground lane and off burst-flooding.
+CHANNEL_DL_INITIAL_DELAY = 10.0
+CHANNEL_DL_GAP = 30.0
 _home_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _home_lock = threading.Lock()
 CHUNK = 65536
@@ -80,7 +86,7 @@ MP3_SYNC_WORDS = (b"\xff\xfb", b"\xff\xfa", b"\xff\xf3", b"\xff\xf2")
 # in WebView2 than webm/opus, which can stall near the end of a stream.
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
 
-_search_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_search_cache: dict[str, tuple[float, tuple[list[dict[str, Any]], list[dict[str, Any]]]]] = {}
 _search_lock = threading.Lock()
 _stream_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _stream_lock = threading.Lock()
@@ -361,6 +367,109 @@ def _fetch_search(query: str) -> list[dict[str, Any]]:
     return items
 
 
+def _is_channel_entry(entry: dict[str, Any]) -> bool:
+    """True when a flat search entry is a channel, not a video."""
+    if str(entry.get("ie_key") or "") == "YoutubeChannel":
+        return True
+    url = str(entry.get("url") or entry.get("webpage_url") or "")
+    for pat in ("/channel/", "/@", "/c/", "/user/"):
+        if pat in url:
+            return True
+    cid = str(entry.get("channel_id") or entry.get("id") or "")
+    if cid.startswith("UC") and len(cid) >= 22 and not re.fullmatch(_VIDEO_ID, cid):
+        if not entry.get("duration") and entry.get("_type") in ("url", None):
+            return True
+    return False
+
+
+def _normalize_channel(entry: dict[str, Any]) -> dict[str, Any]:
+    cid = str(entry.get("channel_id") or "")
+    if not cid and str(entry.get("id") or "").startswith("UC"):
+        cid = str(entry.get("id"))
+    name = str(entry.get("channel") or entry.get("uploader") or entry.get("title") or "").strip()[:200]
+    url = str(entry.get("webpage_url") or entry.get("url") or "")
+    if not url.startswith("http") and cid:
+        url = f"https://www.youtube.com/channel/{cid}"
+    return {
+        "kind": "channel",
+        "channel_id": cid,
+        "name": name or "Unknown channel",
+        "channel_url": url,
+        "thumbnail": _thumbnail(entry),
+    }
+
+
+def _fetch_search_split(query: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """One ytsearch fetch partitioned into (video rows, channel cards)."""
+    opts = base_opts(extract_flat="in_playlist", skip_download=True, ignoreerrors=False, retries=2, socket_timeout=30)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"ytsearch{SEARCH_POOL}:{query}", download=False)
+    videos: list[dict[str, Any]] = []
+    channels: list[dict[str, Any]] = []
+    for entry in (info or {}).get("entries") or []:
+        if not entry or not entry.get("id"):
+            continue
+        if _is_channel_entry(entry):
+            if len(channels) < MAX_CHANNEL_RESULTS:
+                channels.append(_normalize_channel(entry))
+        else:
+            if len(videos) < SEARCH_POOL:
+                videos.append(_normalize(entry))
+    return videos, channels
+
+
+def resolve_channel_videos(channel_url: str, limit: int = MAX_CHANNEL_VIDEOS) -> list[dict[str, Any]]:
+    """Resolve a channel URL/handle into video rows (capped)."""
+    url = (channel_url or "").strip()
+    if not url:
+        return []
+    if not url.startswith("http"):
+        url = "https://www.youtube.com/" + url.lstrip("/")
+    if not url.rstrip("/").endswith("/videos"):
+        url = url.rstrip("/") + "/videos"
+    try:
+        rows = _fetch_tab_items(url, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(friendly_network_error(exc)) from exc
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        vid = row.get("id") or ""
+        if not re.fullmatch(_VIDEO_ID, vid) or vid in seen:
+            continue
+        seen.add(vid)
+        out.append(row)
+    return out[:limit]
+
+
+def _register_resolved(rows: list[dict[str, Any]]) -> None:
+    """Register resolved rows as DB tracks (metadata only, no downloads)."""
+    try:
+        bitrate = int(settings.get("bitrate") or 320)
+    except (TypeError, ValueError):
+        bitrate = 320
+    for row in rows:
+        try:
+            vid = row.get("id") or ""
+            if not vid:
+                continue
+            library_db.get_or_create_track(
+                vid, row.get("title") or vid,
+                f"https://www.youtube.com/watch?v={vid}", bitrate,
+                channel=str(row.get("channel") or "")[:200])
+        except Exception:  # noqa: BLE001 - one bad row must not break the batch
+            continue
+
+
+def _disk_complete(video_id: str) -> bool:
+    """True when the track already has a complete file on disk."""
+    try:
+        track = library_db.get_track(video_id)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(track and track.get("file_path") and Path(track["file_path"]).is_file())
+
+
 def _fetch_tab_items(url_or_key: str, limit: int = HOME_LIMIT) -> list[dict[str, Any]]:
     opts = base_opts(extract_flat="in_playlist", skip_download=True, ignoreerrors=False, retries=2, socket_timeout=30)
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -521,7 +630,7 @@ def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
     """Flat YouTube search, cached per query. Returns one page of results."""
     query = (query or "").strip()
     if not query:
-        return {"items": [], "total": 0, "offset": 0, "query": query, "cookies": bool(cookies_path())}
+        return {"items": [], "total": 0, "offset": 0, "query": query, "cookies": bool(cookies_path()), "channels": []}
 
     if is_offline():
         needle = query.lower()
@@ -558,6 +667,7 @@ def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
             "query": query,
             "cookies": bool(cookies_path()),
             "offline": True,
+            "channels": [],
         }
 
     key = query.lower()
@@ -565,14 +675,18 @@ def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
     with _search_lock:
         cached = _search_cache.get(key)
         if cached and now - cached[0] < SEARCH_TTL:
-            items = cached[1]
+            items, channels = cached[1]
         else:
             try:
                 parsed = parse_youtube_url(query)
-                items = _fetch_url_items(parsed) if parsed else _fetch_search(query)
+                if parsed:
+                    items = _fetch_url_items(parsed)
+                    channels = []
+                else:
+                    items, channels = _fetch_search_split(query)
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(friendly_network_error(exc)) from exc
-            _search_cache[key] = (time.time(), items)
+            _search_cache[key] = (time.time(), (items, channels))
 
     start = max(0, min(int(offset), len(items)))
     size = max(1, min(int(limit), SEARCH_POOL))
@@ -582,6 +696,7 @@ def search(query: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
         "offset": start,
         "query": query,
         "cookies": bool(cookies_path()),
+        "channels": channels if start == 0 else [],
     }
 
 
@@ -1512,6 +1627,63 @@ class Api:
 
     def add_links(self, text: str) -> dict[str, Any]:
         return add_links(text)
+
+    def add_channel_to_queue(self, channel_url: str) -> dict[str, Any]:
+        """Resolve a channel into queue rows (registers tracks, no downloads)."""
+        if is_offline():
+            return {"ok": False, "skipped": True, "reason": "offline"}
+        try:
+            rows = resolve_channel_videos(channel_url)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        if not rows:
+            return {"ok": True, "items": [], "total": 0, "reason": "empty"}
+        _register_resolved(rows)
+        return {"ok": True, "items": rows, "total": len(rows),
+                "channel_url": channel_url}
+
+    def add_channel_to_downloads(self, channel_url: str) -> dict[str, Any]:
+        """Queue a whole channel for staggered background downloading.
+
+        Disk library-building: memory_mode is ignored (memory rows die on
+        restart). One download starts per CHANNEL_DL_GAP after an initial
+        CHANNEL_DL_INITIAL_DELAY; already-complete tracks are skipped.
+        """
+        if is_offline():
+            return {"ok": False, "skipped": True, "reason": "offline"}
+        try:
+            rows = resolve_channel_videos(channel_url)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        rows = [r for r in rows if not _disk_complete(r.get("id") or "")]
+        if not rows:
+            return {"ok": True, "queued": 0, "total": 0, "reason": "empty-or-complete"}
+        _register_resolved(rows)
+
+        def _run() -> None:
+            time.sleep(CHANNEL_DL_INITIAL_DELAY)
+            bitrate = _current_bitrate()
+            for row in rows:
+                try:
+                    if is_offline():
+                        break
+                    vid = row.get("id") or ""
+                    if not vid:
+                        continue
+                    download_manager.start(
+                        vid, row.get("title") or vid,
+                        f"https://www.youtube.com/watch?v={vid}",
+                        bitrate, memory_mode=False,
+                        priority=downloader.BG_PRIORITY,
+                        channel=str(row.get("channel") or "")[:200],
+                    )
+                except Exception:  # noqa: BLE001 - one bad row must not stop the stagger
+                    pass
+                time.sleep(CHANNEL_DL_GAP)
+
+        threading.Thread(target=_run, daemon=True, name="channel-stagger").start()
+        return {"ok": True, "queued": len(rows), "total": len(rows),
+                "initial_delay": CHANNEL_DL_INITIAL_DELAY, "gap": CHANNEL_DL_GAP}
 
     def status(self) -> dict[str, Any]:
         return {

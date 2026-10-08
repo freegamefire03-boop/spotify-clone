@@ -5,7 +5,7 @@
 > - **Implemented:** persistent-library core, direct-to-MP3 downloading, offline replay from disk, instant-start playback (valid-frame gate + adaptive burst + `prepare_track` + hover prefetch; manual pre-buffer removed), hidden ffmpeg process, playback readiness/retry behavior, friendly network errors, YouTube URL search, search focus + `Ctrl+L`, MP3-quality switch (128/192/320), download-progress display, settings panel (memory mode, prefetch depth, download folder, cookies, session), memory-mode backend, queue prefetch, long-lived encode lanes (1 FG + 2 BG), orphan `.part` cleanup, skip/interrupt handling (cancel + delete, no resume), download-folder change flow + copy prompt, conditional home view, YouTube-style sidebar, watch history + home sections, session restore, cookie management UI.
 > - **Implemented 2026-10-06:** seek-beyond-edge hold-open (§5), panel exclusivity + dismiss, Home-button fix, progress-bar suppression on cache hits, queue add-links (**untested**, see §8), Downloads page, offline mode, settings-modal swap (preview polished: retired Continue toggle replaced by Offline mode, stepper fixed to 0–10, all settings wired, live mini-player).
 > - **Implemented then superseded:** 10s-ahead pacing and pause-securing-10s were built, then removed by the playback-lane fix — downloads are now uncapped with a stall watchdog (see §1). `continue_current` setting retired.
-> - **Still pending:** re-test of queue add-links dedupe in a clean interpreter (see §8); live/GUI confirmation of all 2026-10-06 items in the running app (selection, dblclick, rubber-band, grip-reorder, channel display, downloads sorts, modal footer, seek hold-open, offline mode).
+> - **Still pending:** live/GUI confirmation of all 2026-10-06 items in the running app (selection, dblclick, rubber-band, grip-reorder, channel display, downloads sorts, modal footer, seek hold-open, offline mode); live/GUI confirmation of all Round-4 items below in the running app.
 
 ## 1. Playback-aware downloading
 
@@ -224,6 +224,37 @@ load.
 - Downloads filters (follow-up, after the channel fix): group/sort downloaded
   titles in the Downloads page by duration, alphabetical (A–Z) order, and
   artist (channel name). Blocked on real channel data above.
+
+## 10. Round-4 work (added 2026-10-08, implemented 2026-10-08)
+
+- [x] Add a remove/delete option for downloaded items
+    - In the selection overlay there is "add to queue" — add a "delete" action next to it for selected items
+    - Also add a remove button for items in the Downloads view
+- [x] Auto-close the selection overlay after add-to-queue or delete
+    - After selecting items and clicking either "add to queue" or "delete", the overlay (containing add queue + delete buttons) must close itself automatically
+    - Currently it stays open and the user must manually click the X button
+    - Applies to both actions; at minimum close on success
+- [x] Support adding a full channel from search results
+    - Searching should find channels (not just tracks)
+    - From a channel: option to add the whole channel to the queue, or to downloads
+    - Download must NOT start instantly — stagger it: start after a delay and spread downloads over a long interval of time (one-by-one with long gaps, avoid burst-flooding)
+- [x] Shuffle options across the app
+    - Shuffle functionality available in all relevant contexts: whole library, queue, search bar results, downloads, etc.
+- [x] Run selfimprove loop to gather all possible features to add
+    - Done 2026-10-08: recorded in `feature-candidates.md` (56 candidates, 9 areas; generate → critique → refine ×2).
+    - Use the selfimprove-loop skill: goal = gather/brainstorm every plausible feature for this app and record them as candidates
+- [x] Fix playback quitting before the track finishes
+    - Fixed 2026-10-08: GUI trusted yt-dlp duration metadata over the media element; now prefers real `audio.duration` (loadedmetadata + durationchange), clamps seeks to the real end.
+    - Symptom: some titles stop at e.g. 2.2min of a ~40min audio (example track: "Mehdi Black Wind - RAPport (Freestyle) (UNCENSORED) BLACK WIND")
+    - First suspicion was a corrupted/never-resumed download, but evidence points to the player:
+      - `C:\Users\essad\Music\Raid - FO I.mp3` plays fully in an external player, but stops at ~2.5min (half) inside the app → file is fine, the app's playback is broken
+    - Possible correlation: affected tracks were mostly added to the queue via the "add links" feature — investigate that path (streamed URL? partial buffer? wrong duration metadata?)
+    - Investigate duration/seek handling: player may trust bogus duration metadata or fail seeking/resuming on streamed/partially-buffered sources
+- [x] Highlight the played portion of the audio timeline in white
+    - Done 2026-10-08: gradient fill on the main scrubber + white mini-scrub fill.
+    - The progress/scrubber bar: the already-played part must be highlighted in white (like the Spotify scrubber in the reference photo — played portion is white)
+    - (User first said green, then explicitly corrected: white, exactly like the Spotify pic)
+    - The red-outlined part in the reference image is the section that must be white
 
 ## Constraints / notes
 

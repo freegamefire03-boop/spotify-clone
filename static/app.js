@@ -548,6 +548,7 @@ function useBridge() {
     setLibraryDir: (p, copy) => api.set_library_dir(p, copy),
     getHome: () => api.get_home(),
     getDownloads: () => api.get_downloads(),
+    deleteTracks: (ids) => api.delete_tracks(ids),
     getSession: () => api.get_session(),
     saveSession: (queue, qIndex) => api.save_session(queue, qIndex),
     getCookieStatus: () => api.get_cookie_status(),
@@ -737,6 +738,9 @@ function rowMarkup(track) {
         <button class="icon-button" data-action="queue" title="Add to queue" aria-label="Add to queue">
           <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
+        <button class="icon-button row-delete" data-action="delete" title="Delete from disk" aria-label="Delete from disk">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12M9 7V5h6v2m-8 0 1 13h8l1-13"/></svg>
+        </button>
       </div>
     </li>`;
 }
@@ -766,6 +770,7 @@ function updateRowStates() {
 
 const selBar = document.getElementById("selBar");
 const selAddBtn = document.getElementById("selAddBtn");
+const selDeleteBtn = document.getElementById("selDeleteBtn");
 const selClearBtn = document.getElementById("selClearBtn");
 
 function syncSelectionUI() {
@@ -826,6 +831,7 @@ function applyDlSort() {
 }
 
 function renderResults() {
+  document.body.classList.toggle("mode-downloads", state.mode === "downloads");
   if (state.mode === "home") {
     const sections = state.homeSections && state.homeSections.length
       ? state.homeSections
@@ -1024,14 +1030,18 @@ async function getCompleteIds() {
   }
 }
 
-function showNothingDownloaded() {
+function stopCurrentPlayback() {
   state.current = null;
   audio.removeAttribute("src");
   audio.load();
-  npTitle.textContent = "Nothing downloaded";
-  npChannel.textContent = "Offline mode — play a downloaded track";
   updateTransportState();
   updateRowStates();
+}
+
+function showNothingDownloaded() {
+  stopCurrentPlayback();
+  npTitle.textContent = "Nothing downloaded";
+  npChannel.textContent = "Offline mode — play a downloaded track";
 }
 
 async function playNextComplete(seen = new Set()) {
@@ -1455,6 +1465,10 @@ resultsList.addEventListener("click", (event) => {
     else playTrack(track);
   } else if (button && button.dataset.action === "queue") {
     addToQueue(track);
+  } else if (button && button.dataset.action === "delete") {
+    if (confirm(`Delete "${track.title}" from disk? This cannot be undone.`)) {
+      performDelete([track.id]);
+    }
   }
 });
 
@@ -1594,6 +1608,27 @@ selAddBtn.addEventListener("click", () => {
   clearSelection(false);
 });
 selClearBtn.addEventListener("click", () => clearSelection(false));
+
+async function performDelete(ids) {
+  if (!ids.length) return;
+  try {
+    const res = await backend.deleteTracks(ids);
+    const deleted = new Set((res && res.deleted) || ids);
+    if (state.current && deleted.has(state.current.id)) stopCurrentPlayback();
+    if (state.mode === "downloads") await loadDownloads();
+    else updateRowStates();
+    clearSelection(false);
+  } catch (_) {
+    npChannel.textContent = "Delete failed";
+  }
+}
+
+selDeleteBtn.addEventListener("click", () => {
+  if (!selectionSet.size) return;
+  const ids = [...new Set([...selectedIdsInDomOrder(), ...selectionSet])];
+  if (!confirm(`Delete ${ids.length} item(s) from disk? This cannot be undone.`)) return;
+  performDelete(ids);
+});
 
 addLinks.addEventListener("click", toggleAddLinks);
 cancelLinks.addEventListener("click", toggleAddLinks);

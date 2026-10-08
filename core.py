@@ -435,6 +435,29 @@ def get_downloads() -> dict[str, Any]:
     return {"items": items, "total": len(items)}
 
 
+def delete_tracks(ids: list[str]) -> dict[str, Any]:
+    """Cancel in-flight downloads, remove files + DB rows for the given ids.
+
+    Memory-mode rows (no disk file) are skipped, not deleted.
+    """
+    deleted = 0
+    skipped = 0
+    for vid in ids or []:
+        try:
+            track = library_db.get_track(vid)
+            if not track or track.get("status") == "memory":
+                skipped += 1
+                continue
+            download_manager.cancel(vid)
+            if library_db.delete_track_file(vid):
+                deleted += 1
+            else:
+                skipped += 1
+        except Exception:  # noqa: BLE001 - one bad id must not break the batch
+            skipped += 1
+    return {"deleted": deleted, "skipped": skipped}
+
+
 def get_home() -> dict[str, Any]:
     """Home feed: YouTube recommendations with cookies, else local library.
 
@@ -1687,6 +1710,12 @@ class Api:
         """Cancel an in-flight download and delete its partial file."""
         download_manager.cancel(video_id)
         return {"ok": True}
+
+    def delete_tracks(self, ids: list[str]) -> dict[str, Any]:
+        try:
+            return delete_tracks(ids)
+        except Exception:  # noqa: BLE001 - delete must never break the GUI
+            return {"deleted": 0, "skipped": len(ids or [])}
 
     def get_home(self) -> dict[str, Any]:
         try:

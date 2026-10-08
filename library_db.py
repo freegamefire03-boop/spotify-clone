@@ -271,6 +271,30 @@ def delete_track(video_id: str) -> None:
         conn.commit()
 
 
+def delete_track_file(video_id: str) -> bool:
+    """Unlink the audio file + any .part, then delete the DB row.
+
+    Returns True if a row existed (deleted), False otherwise. The unlink runs
+    outside the `with` so the SQLite handle closes first (Windows file locking).
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT file_path FROM tracks WHERE video_id = ?", (video_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        file_path = row["file_path"]
+        conn.execute("DELETE FROM tracks WHERE video_id = ?", (video_id,))
+        conn.commit()
+    if file_path:
+        try:
+            Path(file_path).unlink(missing_ok=True)
+            Path(str(file_path) + ".part").unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
 def list_tracks() -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM tracks ORDER BY created_at DESC").fetchall()

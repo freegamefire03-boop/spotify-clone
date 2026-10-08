@@ -188,6 +188,21 @@ body.nav-push .content, body.nav-push .player { margin-left: var(--sidenav-w); }
   place-items: center;
 }
 .sel-clear:hover { background: #3a3a3a; color: #fff; }
+.sel-delete {
+  border: none;
+  border-radius: 999px;
+  background: #e22134;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+.sel-delete:hover { background: #f13b4d; }
+
+.row .row-delete { display: none; }
+body.mode-downloads .row .row-delete { display: grid; }
+body.mode-downloads .row .row-delete:hover { color: #ff5c5c; background: #3a1d1d; }
 
 #rbRect {
   position: fixed;

@@ -1591,6 +1591,7 @@ selAddBtn.addEventListener("click", () => {
   renderQueue();
   updateRowStates();
   scheduleSaveSession();
+  clearSelection(false);
 });
 selClearBtn.addEventListener("click", () => clearSelection(false));
 

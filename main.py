@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from core import Api, application, setup_logging  # noqa: E402
 import library_db  # noqa: E402
+import thumbs  # noqa: E402
 import logging
 
 WINDOW_TITLE = "Spotify Clone"
@@ -44,6 +45,15 @@ def main() -> int:
         # Reconcile stale downloads + orphaned .part files from previous sessions
         stats = library_db.reconcile_stale_downloads()
         log.info("startup reconcile %s", stats)
+
+        # Warm the cover cache for everything already in the library, so a
+        # single online boot is enough to keep artwork after going offline.
+        try:
+            for row in library_db.list_tracks():
+                if row.get("video_id"):
+                    thumbs.ensure_async(str(row["video_id"]))
+        except Exception as exc:  # noqa: BLE001 - artwork is never fatal
+            log.debug("thumbnail warm-up skipped: %s", exc)
 
         # The WSGI app goes in as the `url` argument: pywebview detects a
         # callable, runs it in a daemon thread in THIS process on a random

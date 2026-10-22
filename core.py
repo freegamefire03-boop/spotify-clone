@@ -31,6 +31,7 @@ import downloader
 import library
 import library_db
 import settings
+import thumbs
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -248,12 +249,21 @@ def _thumbnail(entry: dict[str, Any]) -> str:
 
 
 def _normalize(entry: dict[str, Any]) -> dict[str, Any]:
+    video_id = entry.get("id")
+    thumbnail = _thumbnail(entry)
+    if video_id:
+        # Warm the on-disk cover cache as soon as a row is produced, so the
+        # artwork survives the next offline session. Fire-and-forget.
+        try:
+            thumbs.ensure_async(str(video_id), thumbnail or None)
+        except Exception:  # noqa: BLE001 - artwork must never break search
+            pass
     return {
-        "id": entry.get("id"),
+        "id": video_id,
         "title": entry.get("title") or "Unknown title",
         "channel": str(entry.get("channel") or entry.get("uploader") or "").strip()[:200],
         "duration": int(entry.get("duration") or 0),
-        "thumbnail": _thumbnail(entry),
+        "thumbnail": thumbnail,
     }
 
 
@@ -545,26 +555,45 @@ def get_downloads() -> dict[str, Any]:
 
 
 def delete_tracks(ids: list[str]) -> dict[str, Any]:
-    """Cancel in-flight downloads, remove files + DB rows for the given ids.
+    """Permanently delete tracks: queued jobs, DB row, audio files, cover.
 
-    Memory-mode rows (no disk file) are skipped, not deleted.
+    Deletion is idempotent (an id with no row still counts as deleted, so the
+    GUI can drop it) and never claims success when a file could not be removed.
     """
-    deleted = 0
-    skipped = 0
-    for vid in ids or []:
+    deleted: list[str] = []
+    skipped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in ids or []:
+        vid = str(raw or "").strip()
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
         try:
-            track = library_db.get_track(vid)
-            if not track or track.get("status") == "memory":
-                skipped += 1
+            # Tombstone first: drops a job already sitting in a lane queue and
+            # stops the encoder, so nothing can re-create the row or the file
+            # after this point.
+            download_manager.purge(vid)
+            result = library_db.delete_track_file(vid)
+            if not result.get("ok"):
+                skipped.append({"id": vid, "reason": str(result.get("error") or "delete-failed")})
                 continue
-            download_manager.cancel(vid)
-            if library_db.delete_track_file(vid):
-                deleted += 1
-            else:
-                skipped += 1
-        except Exception:  # noqa: BLE001 - one bad id must not break the batch
-            skipped += 1
-    return {"deleted": deleted, "skipped": skipped}
+            thumbs.remove(vid)
+            deleted.append(vid)
+        except Exception as exc:  # noqa: BLE001 - one bad id must not break the batch
+            skipped.append({"id": vid, "reason": str(exc)[:160] or "delete-failed"})
+    if deleted:
+        # The local home feed is cached for HOME_TTL; otherwise a deleted
+        # track keeps showing up under "Recently played" until it expires.
+        with _home_lock:
+            _home_cache.pop("lib", None)
+            _home_cache.pop("rec", None)
+    return {
+        "ok": True,
+        "deleted": len(deleted),
+        "skipped": len(skipped),
+        "deleted_ids": deleted,
+        "skipped_items": skipped,
+    }
 
 
 def get_home() -> dict[str, Any]:
@@ -1576,6 +1605,47 @@ def _skip(upstream, amount: int):
     return handle
 
 
+def _thumb_response(start_response: Callable, video_id: str):
+    """Serve a cached cover, or redirect to the remote one while it warms."""
+    path = thumbs.local_path(video_id)
+    if path is not None and path.is_file():
+        try:
+            data = path.read_bytes()
+        except OSError:
+            data = b""
+        if data:
+            start_response(
+                "200 OK",
+                [
+                    ("Content-Type", thumbs.content_type(data)),
+                    ("Content-Length", str(len(data))),
+                    # Video covers never change for a given id.
+                    ("Cache-Control", "public, max-age=31536000, immutable"),
+                ],
+            )
+            return [data]
+
+    if thumbs.valid_id(video_id) and not thumbs.offline():
+        # Cold cache: let the browser paint the remote image immediately while
+        # a background job stores a local copy for the next (possibly offline)
+        # render. The redirect is not cacheable, so the local file wins later.
+        thumbs.ensure_async(video_id)
+        start_response(
+            "302 Found",
+            [
+                ("Location", thumbs.remote_url(video_id)),
+                ("Cache-Control", "no-store"),
+            ],
+        )
+        return [b""]
+
+    start_response(
+        "404 Not Found",
+        [("Content-Type", "text/plain"), ("Cache-Control", "no-store")],
+    )
+    return [b"no thumbnail"]
+
+
 def _static_response(start_response: Callable, path: str):
     rel = path.lstrip("/") or "index.html"
     target = (STATIC_DIR / rel).resolve()
@@ -1613,6 +1683,9 @@ def application(environ: dict, start_response: Callable) -> Iterable[bytes]:
             start_response("404 Not Found", [("Content-Type", "text/plain")])
             return [b"missing id"]
         return _audio_response(start_response, video_id, environ.get("HTTP_RANGE"))
+    if path.startswith("/thumb/"):
+        video_id = path[len("/thumb/") :].split("?")[0].strip("/")
+        return _thumb_response(start_response, video_id)
     return _static_response(start_response, path)
 
 
@@ -1669,6 +1742,10 @@ class Api:
                         break
                     vid = row.get("id") or ""
                     if not vid:
+                        continue
+                    if download_manager.is_purged(vid):
+                        # Deleted from the app while this channel was still
+                        # staggering: never bring it back.
                         continue
                     download_manager.start(
                         vid, row.get("title") or vid,

@@ -196,7 +196,7 @@ def reconcile_stale_downloads() -> dict[str, int]:
       and non-`.part` files are never touched.
     - Memory-only rows are dropped (their buffers died with the process).
 
-    Returns counts of {repaired: N, failed: M, parts_deleted: K}.
+    Returns counts of {repaired: N, failed: M, parts_deleted: K, pruned: P}.
     """
     repaired = 0
     failed = 0
@@ -240,6 +240,19 @@ def reconcile_stale_downloads() -> dict[str, int]:
                 pass
         conn.execute("DELETE FROM tracks WHERE status = 'memory'")
         conn.commit()
+        # Completed rows whose file vanished (deleted outside the app, failed
+        # unlink, or a stale row from an older delete path) can never play:
+        # drop them so the DB matches the disk.
+        pruned = 0
+        for row in conn.execute(
+            "SELECT video_id, file_path FROM tracks WHERE status = 'mp3'"
+        ).fetchall():
+            fp = row["file_path"]
+            if not fp or not Path(fp).is_file():
+                conn.execute("DELETE FROM tracks WHERE video_id = ?", (row["video_id"],))
+                pruned += 1
+        if pruned:
+            conn.commit()
     # Folder sweep: orphans with no DB row (row deleted, collision rename,
     # or a failed delete inside the downloader). Only *.part matches, so
     # completed .mp3 files and anything else survive by construction.
@@ -262,7 +275,8 @@ def reconcile_stale_downloads() -> dict[str, int]:
                     pass
         except OSError:
             pass
-    return {"repaired": repaired, "failed": failed, "parts_deleted": parts_deleted}
+    return {"repaired": repaired, "failed": failed, "parts_deleted": parts_deleted,
+            "pruned": pruned}
 
 
 def delete_track(video_id: str) -> None:
@@ -271,28 +285,60 @@ def delete_track(video_id: str) -> None:
         conn.commit()
 
 
-def delete_track_file(video_id: str) -> bool:
+def _unlink_retry(path: Path, attempts: int = 8, delay: float = 0.12) -> bool:
+    """Delete one file, retrying while Windows still holds the handle.
+
+    Returns True when the file is gone (including "was never there").
+    """
+    for attempt in range(attempts):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt == attempts - 1:
+                return False
+            time.sleep(delay)
+    return False
+
+
+def delete_track_file(video_id: str) -> dict[str, Any]:
     """Unlink the audio file + any .part, then delete the DB row.
 
-    Returns True if a row existed (deleted), False otherwise. The unlink runs
-    outside the `with` so the SQLite handle closes first (Windows file locking).
+    Returns {"ok", "found", "file_removed", "error"}. `ok` is False only when
+    a file still exists and could not be removed: the row is then kept, so the
+    GUI never reports a delete that did not actually happen. Deleting an id
+    with no row is a success (idempotent).
     """
     with _connect() as conn:
         row = conn.execute(
             "SELECT file_path FROM tracks WHERE video_id = ?", (video_id,)
         ).fetchone()
         if row is None:
-            return False
+            return {"ok": True, "found": False, "file_removed": False}
         file_path = row["file_path"]
+
+    removed = False
+    if file_path:
+        # The .mp3 first, then the abandoned .part.
+        for target in (Path(file_path), Path(str(file_path) + ".part")):
+            if not target.exists():
+                continue
+            if not _unlink_retry(target):
+                return {
+                    "ok": False,
+                    "found": True,
+                    "file_removed": False,
+                    "error": f"file is in use: {target.name}",
+                }
+            removed = True
+
+    # Only drop the row once the bytes are really gone (or were never there).
+    with _connect() as conn:
         conn.execute("DELETE FROM tracks WHERE video_id = ?", (video_id,))
         conn.commit()
-    if file_path:
-        try:
-            Path(file_path).unlink(missing_ok=True)
-            Path(str(file_path) + ".part").unlink(missing_ok=True)
-        except OSError:
-            pass
-    return True
+    return {"ok": True, "found": True, "file_removed": removed}
 
 
 def list_tracks() -> list[dict[str, Any]]:

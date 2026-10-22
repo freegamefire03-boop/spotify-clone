@@ -5,7 +5,8 @@
 > - **Implemented:** persistent-library core, direct-to-MP3 downloading, offline replay from disk, instant-start playback (valid-frame gate + adaptive burst + `prepare_track` + hover prefetch; manual pre-buffer removed), hidden ffmpeg process, playback readiness/retry behavior, friendly network errors, YouTube URL search, search focus + `Ctrl+L`, MP3-quality switch (128/192/320), download-progress display, settings panel (memory mode, prefetch depth, download folder, cookies, session), memory-mode backend, queue prefetch, long-lived encode lanes (1 FG + 2 BG), orphan `.part` cleanup, skip/interrupt handling (cancel + delete, no resume), download-folder change flow + copy prompt, conditional home view, YouTube-style sidebar, watch history + home sections, session restore, cookie management UI.
 > - **Implemented 2026-10-06:** seek-beyond-edge hold-open (§5), panel exclusivity + dismiss, Home-button fix, progress-bar suppression on cache hits, queue add-links (**untested**, see §8), Downloads page, offline mode, settings-modal swap (preview polished: retired Continue toggle replaced by Offline mode, stepper fixed to 0–10, all settings wired, live mini-player).
 > - **Implemented then superseded:** 10s-ahead pacing and pause-securing-10s were built, then removed by the playback-lane fix — downloads are now uncapped with a stall watchdog (see §1). `continue_current` setting retired.
-> - **Still pending:** live/GUI confirmation of all 2026-10-06 items in the running app (selection, dblclick, rubber-band, grip-reorder, channel display, downloads sorts, modal footer, seek hold-open, offline mode); live/GUI confirmation of all Round-4 items below in the running app.
+> - **Implemented 2026-10-22 (Round 5):** local thumbnail cache served offline, window-scoped keyboard shortcuts, and permanent delete across queue, DB, disk, and cover cache. See §11.
+> - **Still pending:** live/GUI confirmation of all 2026-10-06 items in the running app (selection, dblclick, rubber-band, grip-reorder, channel display, downloads sorts, modal footer, seek hold-open, offline mode); live/GUI confirmation of all Round-4 items below in the running app; live/GUI confirmation of the Round-5 items in §11 (offline covers, shortcuts, permanent delete).
 
 ## 1. Playback-aware downloading
 
@@ -255,6 +256,76 @@ load.
     - The progress/scrubber bar: the already-played part must be highlighted in white (like the Spotify scrubber in the reference photo — played portion is white)
     - (User first said green, then explicitly corrected: white, exactly like the Spotify pic)
     - The red-outlined part in the reference image is the section that must be white
+
+## 11. Round-5 work (added 2026-10-22)
+
+- [x] Cache thumbnails locally so they work offline
+    - Done 2026-10-22: `thumbs.py` stores one image per video id in
+      `cache/thumbs/` (atomic write, 4 MB cap, magic-byte validation) and the
+      WSGI app serves it at `/thumb/<id>` with an immutable cache header.
+    - Frontend rows now load `/thumb/<id>`; on a miss the image falls back to
+      the remote cover once, then to an inline SVG placeholder.
+    - The cache is warmed when search/home rows are built, when a download
+      starts, and at boot for every row already in the library.
+    - Deleting a track removes its cached cover.
+
+    - Thumbnails currently point at `i.ytimg.com`, so every cover breaks when
+      the machine is offline (search, home, downloads, restored queue).
+    - Store a copy of each track thumbnail in a local cache directory, keyed by
+      video id, and serve it through the local WSGI app (e.g. `/thumb/<id>`).
+    - Frontend renders `/thumb/<id>` and falls back to a placeholder tile when
+      the image is unavailable; it must not depend on the remote URL at all.
+    - Warm the cache when search/home rows are produced and when a download
+      starts, so a track downloaded once keeps its cover offline forever.
+    - Deleting a track also deletes its cached thumbnail.
+- [x] In-app keyboard shortcuts (window-scoped only, never OS-global)
+    - Done 2026-10-22: one `document` keydown handler (no OS hooks).
+    - Space toggles play/pause; Alt+Left/Right = previous/next; Ctrl+S toggles
+      shuffle; Alt+Up/Down change volume in 5% steps with a toast readout.
+    - Shortcuts are ignored while typing in an input/textarea/select/contenteditable
+      and while the settings or guide modal is open; Ctrl+S is handled before
+      that guard so it can never open the webview save dialog.
+    - The results-list arrow handler now ignores Alt+arrows so the transport
+      shortcut wins when a row has focus.
+
+    - Space = play/pause
+    - Alt+Right = next track, Alt+Left = previous track
+    - Ctrl+S = shuffle on/off
+    - Alt+Up = volume up, Alt+Down = volume down (5% steps)
+    - Ignore all shortcuts while typing in an input/textarea/contenteditable,
+      and while the settings/guide modals are open.
+    - Give brief visible feedback for shuffle and volume changes.
+- [x] Delete must be permanent: out of the UI, the DB, and the disk
+    - Done 2026-10-22: `delete_tracks()` purges the id from the download
+      manager first (tombstone drops queued jobs, terminates the encoder,
+      frees memory buffers), then unlinks `.mp3` + `.part`, then deletes the
+      DB row, then removes the cached cover. Idempotent for missing rows.
+    - `delete_track_file()` retries the unlink (Windows handles) and keeps the
+      row + reports "file is in use" instead of claiming a delete that failed.
+    - The frontend uses the backend's real `deleted_ids`, drops the track from
+      the queue/session and every visible list, refreshes the current view,
+      and stops playback when the deleted track was current.
+    - Memory-mode rows are now deletable; the channel stagger loop skips ids
+      deleted while it is still queuing; the local home cache is invalidated.
+    - Startup reconcile also prunes `status=mp3` rows whose file is gone, and
+      the old `Set(number)` crash in `performDelete()` is gone.
+
+    - Reported: deleted titles disappear from the UI for a while and come back
+      after a restart; the file and/or the DB row survives, or a stale queue
+      entry re-downloads it. Delete must mean delete, definitively.
+    - Cancel/forget any queued or in-flight download for that id so a late
+      lane dispatch or an ffmpeg finish cannot re-create the row or the file.
+    - Remove the DB row, unlink the `.mp3` and `.part`, drop the cached
+      thumbnail, remove the item from the queue/session, and refresh the
+      current view (downloads, search or home).
+    - Do not swallow an unlink failure: retry briefly (Windows may still hold
+      the handle), then report the failure and keep the row instead of lying.
+    - Memory-mode rows must be deletable too (currently skipped).
+    - Investigation findings: `performDelete()` builds a `Set` from the
+      backend's numeric `deleted` count -> `TypeError` -> the reload and the
+      "stop current playback" branches never run; `delete_tracks()` skips any
+      `memory` row; unlink errors are silently ignored; a job still queued in
+      a download lane can dispatch after the delete and upsert the row again.
 
 ## Constraints / notes
 

@@ -24,6 +24,7 @@ import yt_dlp
 
 import library
 import library_db
+import thumbs
 
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best"
 
@@ -102,6 +103,10 @@ class DownloadManager:
         self._on_finished = on_finished
         self._lock = threading.Lock()
         self._downloads: dict[str, dict[str, Any]] = {}
+        # Tombstones for ids deleted by the user: a job already sitting in a
+        # lane queue must be dropped, and an encoder that finishes right after
+        # the delete must not publish the file or re-create the DB row.
+        self._purged: dict[str, float] = {}
         self._max_workers = max(1, int(max_workers or 3))
         self._fg_queue: queue.Queue[AudioJob] = queue.Queue()
         self._bg_queue: queue.Queue[AudioJob] = queue.Queue()
@@ -134,6 +139,9 @@ class DownloadManager:
 
     def _dispatch(self, job: AudioJob) -> None:
         """Run one job on a worker thread (existing pump code, verbatim)."""
+        if self.is_purged(job.video_id):
+            # Deleted while queued: nothing to cancel, nothing to write.
+            return
         with self._lock:
             rec = self._downloads.get(job.video_id)
             if rec is None or rec.get("cancel"):
@@ -193,6 +201,13 @@ class DownloadManager:
         concurrent duplicate starts are absorbed before any job is queued.
         """
         library_db.init_db()
+        with self._lock:
+            # A real re-play clears the tombstone: same id, new intent.
+            self._purged.pop(video_id, None)
+        try:
+            thumbs.ensure_async(video_id)
+        except Exception:  # noqa: BLE001 - artwork is optional
+            pass
         track = library_db.get_or_create_track(
             video_id, title, url, bitrate, channel=str(channel or "")[:200])
 
@@ -368,6 +383,46 @@ class DownloadManager:
             proc = rec.get("proc")
         if proc and proc.poll() is None:
             proc.terminate()
+
+    def purge(self, video_id: str) -> None:
+        """Forget a permanently deleted track.
+
+        Drops a job that is still waiting in a lane queue, terminates the
+        encoder, and frees memory-mode buffers. The tombstone makes a worker
+        that is already mid-download stop before it publishes the file or
+        writes the DB row again.
+        """
+        vid = str(video_id or "")
+        if not vid:
+            return
+        now = time.time()
+        with self._lock:
+            self._purged[vid] = now
+            if len(self._purged) > 4096:
+                cutoff = now - 6 * 3600
+                self._purged = {k: t for k, t in self._purged.items() if t >= cutoff}
+            rec = self._downloads.pop(vid, None)
+            if rec is not None:
+                rec["cancel"] = True
+                rec["status"] = "cancelled"
+        if rec is None:
+            return
+        proc = rec.get("proc")
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001 - deletion must never fail here
+                pass
+        buffer = rec.get("buffer")
+        if buffer is not None:
+            try:
+                buffer.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def is_purged(self, video_id: str) -> bool:
+        with self._lock:
+            return str(video_id or "") in self._purged
 
     def set_paused(self, video_id: str, paused: bool) -> dict[str, Any]:
         """Freeze/unfreeze a download in place (never abandons progress).
@@ -724,6 +779,14 @@ class DownloadManager:
             stderr = proc.communicate()[1]
             code = proc.returncode
 
+            if self.is_purged(video_id):
+                # Deleted while buffering: drop the buffer, write nothing.
+                try:
+                    buffer.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+
             with self._lock:
                 rec = self._downloads.get(video_id)
                 cancelled = bool(rec and rec.get("cancel")
@@ -888,6 +951,14 @@ class DownloadManager:
 
             stderr = proc.communicate()[1]
             code = proc.returncode
+
+            if self.is_purged(video_id):
+                # Deleted while encoding: never publish the bytes.
+                try:
+                    part_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
 
             with self._lock:
                 rec = self._downloads.get(video_id)

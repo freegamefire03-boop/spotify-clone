@@ -591,6 +591,79 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+// --- In-app keyboard shortcuts (window-scoped, never OS-global) --------------
+// Space: play/pause · Alt+Left/Right: prev/next · Ctrl+S: shuffle
+// Alt+Up/Down: volume ±5%
+const THUMB_PLACEHOLDER = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 48">
+     <rect width="84" height="48" fill="#1b1b1b"/>
+     <path d="M38 33V15l14-3v18" fill="none" stroke="#5a5a5a" stroke-width="2"/>
+     <circle cx="35" cy="34" r="3.5" fill="#5a5a5a"/>
+     <circle cx="49" cy="31" r="3.5" fill="#5a5a5a"/>
+   </svg>`
+);
+
+document.addEventListener("error", (event) => {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains("thumb")) return;
+  const remote = img.dataset.remote || "";
+  if (remote && img.dataset.fallback !== "1") {
+    // The id is not cached yet (302/404): try the remote cover once.
+    img.dataset.fallback = "1";
+    img.src = remote;
+    return;
+  }
+  img.classList.add("thumb-missing");
+  img.dataset.fallback = "1";
+  img.src = THUMB_PLACEHOLDER;
+}, true);
+
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = (el.tagName || "").toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable;
+}
+
+function adjustVolume(delta) {
+  const next = Math.min(1, Math.max(0, Number(audio.volume) + delta));
+  audio.volume = Number(next.toFixed(2));
+  if (volume) volume.value = String(audio.volume);
+  showMToast(`Volume ${Math.round(audio.volume * 100)}%`);
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
+  if (!settingsBackdrop.hidden || !settingsGuideBackdrop.hidden) return;
+
+  const key = event.key || "";
+  const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
+
+  // Checked before the "typing" guard: Ctrl+S must never open the webview's
+  // save-page dialog, and it is not a character the user could be typing.
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && key.toLowerCase() === "s") {
+    event.preventDefault();
+    setShuffle(!state.shuffle);
+    showMToast(state.shuffle ? "Shuffle on" : "Shuffle off");
+    return;
+  }
+
+  if (isTypingTarget(event.target)) return;
+
+  if (plain && (key === " " || event.code === "Space")) {
+    if (!state.current && !state.queue.length) return;
+    event.preventDefault();
+    togglePlayback();
+    return;
+  }
+
+  if (event.altKey && !event.ctrlKey && !event.metaKey) {
+    if (key === "ArrowRight") { event.preventDefault(); playNext(); return; }
+    if (key === "ArrowLeft") { event.preventDefault(); playPrev(); return; }
+    if (key === "ArrowUp") { event.preventDefault(); adjustVolume(0.05); return; }
+    if (key === "ArrowDown") { event.preventDefault(); adjustVolume(-0.05); return; }
+  }
+});
+
 function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
   const total = Math.floor(seconds);
@@ -735,10 +808,15 @@ function closeQueuePanel() {
   queuePanel.hidden = true;
 }
 
+function thumbSrc(track) {
+  const id = track && track.id;
+  return id ? `/thumb/${encodeURIComponent(id)}` : "";
+}
+
 function rowMarkup(track) {
   return `
     <li class="row" data-id="${track.id}" tabindex="-1" aria-selected="false">
-      <img class="thumb" src="${track.thumbnail}" alt="" loading="lazy" />
+      <img class="thumb" src="${thumbSrc(track)}" data-remote="${escapeHtml(track.thumbnail || "")}" alt="" loading="lazy" />
       <div class="meta">
         <div class="title">${escapeHtml(track.title)}</div>
         <div class="channel">${escapeHtml(track.channel || "Unknown channel")} <span class="queued-flag" data-queued hidden></span></div>
@@ -1481,6 +1559,8 @@ resultsList.addEventListener("keydown", (event) => {
   const inResults = resultsList.contains(document.activeElement) || document.activeElement === resultsList;
   if (!inResults) return;
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "") && document.activeElement !== resultsList) return;
+  // Alt+arrows belong to the window-level transport shortcuts (prev/next).
+  if (event.altKey) return;
 
   const mod = event.ctrlKey || event.metaKey;
   const focusCaret = () => {
@@ -1742,16 +1822,54 @@ selAddBtn.addEventListener("click", () => {
 });
 selClearBtn.addEventListener("click", () => clearSelection(false));
 
+function dropTracksLocally(ids) {
+  const gone = new Set(ids || []);
+  if (!gone.size) return;
+  const currentId = state.current ? state.current.id : null;
+  state.queue = state.queue.filter((t) => !gone.has(t.id));
+  if (currentId) {
+    state.qIndex = state.queue.findIndex((t) => t.id === currentId);
+  } else if (state.qIndex >= state.queue.length) {
+    state.qIndex = state.queue.length - 1;
+  }
+  // Every view that may still hold the row (home/result arrays can alias).
+  state.results = state.results.filter((t) => !gone.has(t.id));
+  state.home = state.home.filter((t) => !gone.has(t.id));
+  state.dlDownloads = state.dlDownloads.filter((t) => !gone.has(t.id));
+  if (Array.isArray(state.homeSections)) {
+    state.homeSections = state.homeSections
+      .map((s) => ({ ...s, items: (s.items || []).filter((t) => !gone.has(t.id)) }))
+      .filter((s) => s.items.length > 0);
+  }
+  for (const id of gone) selectionSet.delete(id);
+  renderQueue();
+  scheduleSaveSession();
+}
+
 async function performDelete(ids) {
-  if (!ids.length) return;
+  const unique = [...new Set(ids || [])].filter(Boolean);
+  if (!unique.length) return;
   try {
-    const res = await backend.deleteTracks(ids);
-    const deleted = new Set((res && res.deleted) || ids);
-    if (state.current && deleted.has(state.current.id)) stopCurrentPlayback();
-    if (state.mode === "downloads") await loadDownloads();
-    else updateRowStates();
+    // Release the file handle before unlinking: Windows cannot remove an
+    // .mp3 that the audio element is still reading.
+    if (state.current && unique.includes(state.current.id)) stopCurrentPlayback();
+    const res = await backend.deleteTracks(unique);
+    // The backend returns the ids it really removed; anything it could not
+    // remove (file locked by Windows) must stay on screen and be reported.
+    const done = res && Array.isArray(res.deleted_ids) ? res.deleted_ids : unique;
+    const failed = res && Array.isArray(res.skipped_items) ? res.skipped_items : [];
+    if (state.current && done.includes(state.current.id)) stopCurrentPlayback();
+    dropTracksLocally(done);
     clearSelection(false);
+    if (state.mode === "downloads") await loadDownloads();
+    else renderResults();
+    if (failed.length) {
+      showMToast(`Could not delete ${failed.length}: ${failed[0].reason || "file in use"}`);
+    } else if (done.length) {
+      showMToast(done.length === 1 ? "Deleted permanently" : `Deleted ${done.length} tracks`);
+    }
   } catch (_) {
+    showMToast("Delete failed");
     npChannel.textContent = "Delete failed";
   }
 }

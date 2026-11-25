@@ -36,7 +36,7 @@ if not defined PYW (
 rem ------------------------------------------------------------- launch the GUI
 rem NOTE: no -WindowStyle Hidden anywhere: SW_HIDE makes the pywebview window
 rem itself invisible, so the app runs with nothing on screen.
-start "" "%PYW%" "%~dp0main.py"
+start "" "%PYW%" "%~dp0main.pyw"
 
 for /l %%I in (1,1,40) do (
   if exist "%PIDFILE%" goto :ready

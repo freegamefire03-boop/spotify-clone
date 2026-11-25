@@ -1,1 +1,28 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
 cache/
+
+# Local runtime data & state (not part of the source repo)
+*.db
+*.sqlite
+*.sqlite3
+settings.json
+*.log
+session_export_*
+mitm_mcp_traffic.db
+1]
+settings preview.html
+
+# Secrets / environment
+.env
+.env.*
+*.key
+*.pem
+*token*
+*secret*
+
+# OS files
+.DS_Store
+Thumbs.db
